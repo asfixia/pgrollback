@@ -1,0 +1,25 @@
+# Regras do Cursor IDE para este projeto
+
+## Ambiente Go
+
+ANTES de executar QUALQUER comando relacionado ao Go (como `go build`, `go test`, `go run`, `make`, etc.), SEMPRE execute primeiro:
+
+```bash
+setEnvironments.bat
+```
+
+Ou combine em uma única linha:
+
+```bash
+call setEnvironments.bat && [comando go aqui]
+```
+
+## Exemplos
+
+- Para executar `go build`: `call setEnvironments.bat && go build`
+- Para executar `go test`: `call setEnvironments.bat && go test ./...`
+- Para executar `make`: `call setEnvironments.bat && make build`
+
+## Importante
+
+O arquivo `setEnvironments.bat` configura as variáveis de ambiente GOROOT e PATH para usar o Go instalado em `C:\Export\go_compiler\bin\go.exe`. Sem executar este script primeiro, os comandos Go podem falhar ou usar uma instalação incorreta do Go.

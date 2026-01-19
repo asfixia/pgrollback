@@ -1,0 +1,14 @@
+postgres:
+  host: localhost
+  port: 5432
+  database: postgres
+  user: postgres
+  password: ""
+
+proxy:
+  listen_port: 5432
+  timeout: 3600s
+
+logging:
+  level: info
+  file: ""
