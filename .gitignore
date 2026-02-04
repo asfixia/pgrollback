@@ -1,1 +1,13 @@
 /.history
+config/pgtest.yaml
+.env
+bin/
+*.exe
+/config/pgtest.yaml
+/.idea
+/.opencode
+*.md
+/.vscode
+opencode.json
+*.log
+*.bat

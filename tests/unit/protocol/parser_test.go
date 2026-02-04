@@ -1,7 +1,9 @@
-package protocol
+package protocol_test
 
 import (
 	"testing"
+
+	"pgtest/pkg/protocol"
 )
 
 func TestExtractTestID(t *testing.T) {
@@ -32,30 +34,38 @@ func TestExtractTestID(t *testing.T) {
 			params: map[string]string{
 				"database": "mydb",
 			},
-			want:    "",
-			wantErr: true,
+			want:    "default",
+			wantErr: false,
 		},
 		{
 			name: "invalid format",
 			params: map[string]string{
 				"application_name": "invalid_format",
 			},
-			want:    "",
-			wantErr: true,
+			want:    "default",
+			wantErr: false,
 		},
 		{
 			name: "empty application_name",
 			params: map[string]string{
 				"application_name": "",
 			},
-			want:    "",
-			wantErr: true,
+			want:    "default",
+			wantErr: false,
+		},
+		{
+			name: "default application_name",
+			params: map[string]string{
+				"application_name": "default",
+			},
+			want:    "default",
+			wantErr: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ExtractTestID(tt.params)
+			got, err := protocol.ExtractTestID(tt.params)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ExtractTestID() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -92,7 +102,7 @@ func TestBuildStartupMessageForPostgres(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := BuildStartupMessageForPostgres(tt.params)
+			got := protocol.BuildStartupMessageForPostgres(tt.params)
 			if got["application_name"] != tt.want {
 				t.Errorf("BuildStartupMessageForPostgres() application_name = %v, want %v", got["application_name"], tt.want)
 			}

@@ -1,14 +1,31 @@
 postgres:
-  host: localhost
-  port: 5432
-  database: postgres
+  host: pgdev
+  port: 5433
+  database: cit
   user: postgres
-  password: ""
+  password: postgres
+  session_timeout: 900s
 
 proxy:
-  listen_port: 5432
+  listen_host: localhost
+  listen_port: 5433
   timeout: 3600s
+  # Intervalo de ping para manter a conexão viva durante pausas longas (ex.: debugging).
+  # Deve ser menor que postgres.session_timeout para evitar idle_in_transaction_session_timeout.
+  keepalive_interval: 300s
 
 logging:
+  # Níveis disponíveis: DEBUG, INFO, WARN, ERROR
+  # DEBUG: Informações detalhadas para debugging
+  # INFO: Informações gerais sobre o funcionamento (padrão)
+  # WARN: Avisos sobre situações que podem ser problemáticas
+  # ERROR: Erros que impedem a execução normal
   level: info
+  # Arquivo de log (vazio = stderr). Exemplo: "logs/pgtest.log"
   file: ""
+
+test:
+  schema: _danilo
+  context_timeout: 10s
+  query_timeout: 5s
+  ping_timeout: 3s

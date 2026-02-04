@@ -8,6 +8,7 @@ import (
 
 const (
 	ProtocolVersion = 196608
+	SSLRequestCode  = 80877103 // Código da mensagem SSLRequest do PostgreSQL
 )
 
 type StartupMessage struct {
@@ -88,6 +89,17 @@ func WriteAuthenticationOK(writer io.Writer) error {
 	return err
 }
 
+// WriteAuthenticationCleartextPassword solicita senha em texto claro do cliente
+func WriteAuthenticationCleartextPassword(writer io.Writer) error {
+	message := []byte{
+		'R',
+		0, 0, 0, 8,
+		0, 0, 0, 3, // AuthenticationCleartextPassword
+	}
+	_, err := writer.Write(message)
+	return err
+}
+
 func WriteReadyForQuery(writer io.Writer) error {
 	message := []byte{
 		'Z',
@@ -99,17 +111,40 @@ func WriteReadyForQuery(writer io.Writer) error {
 }
 
 func WriteErrorResponse(writer io.Writer, message string) error {
+	// Formato PostgreSQL ErrorResponse:
+	// Byte 'E' + Length (4 bytes) + Fields (cada campo: tipo byte + valor + null) + null final
+	// O length inclui os 4 bytes do próprio length + o conteúdo
 	msgBytes := []byte(message)
-	length := 4 + len(msgBytes) + 1
-	
-	response := make([]byte, 0, length+1)
-	response = append(response, 'E')
-	response = append(response, byte(length>>24), byte(length>>16), byte(length>>8), byte(length))
-	response = append(response, 'M')
+	severityBytes := []byte("ERROR")
+
+	// Campos: 'S' + severity + null + 'M' + message + null + null final
+	contentLength := 1 + len(severityBytes) + 1 + 1 + len(msgBytes) + 1 + 1
+	// Length = 4 (bytes do length) + conteúdo
+	totalLength := 4 + contentLength
+
+	response := make([]byte, 0, totalLength+1)
+
+	response = append(response, 'E') // ErrorResponse type
+	response = append(response, byte(totalLength>>24), byte(totalLength>>16), byte(totalLength>>8), byte(totalLength))
+	response = append(response, 'S') // Severity field
+	response = append(response, severityBytes...)
+	response = append(response, 0)   // null terminator for severity
+	response = append(response, 'M') // Message field
 	response = append(response, msgBytes...)
-	response = append(response, 0)
-	response = append(response, 0)
+	response = append(response, 0) // null terminator for message
+	response = append(response, 0) // final null terminator
 
 	_, err := writer.Write(response)
+	return err
+}
+
+// WriteSSLResponse responde à solicitação SSL do cliente
+// 'S' = SSL permitido, 'N' = SSL não permitido
+func WriteSSLResponse(writer io.Writer, allowSSL bool) error {
+	if allowSSL {
+		_, err := writer.Write([]byte{'S'})
+		return err
+	}
+	_, err := writer.Write([]byte{'N'})
 	return err
 }
