@@ -26,6 +26,7 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	config.Init()
 	config.SetOnce(configResult.Config, configResult.ConfigPath)
 
 	// Inicializa o logger a partir da configuração

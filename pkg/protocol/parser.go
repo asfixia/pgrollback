@@ -25,6 +25,10 @@ func ExtractTestID(params map[string]string) (string, error) {
 		return match[1], nil
 	}
 
+	if len(appName) > 0 {
+		return appName, nil
+	}
+
 	// Qualquer outro application_name (como "pgAdmin", "psql", etc.) usa conexão compartilhada
 	// O application_name será definido como "pgtest_default" ao conectar ao PostgreSQL real
 	return "default", nil
