@@ -18,7 +18,7 @@ import (
 
 const (
 	// ConnectionTimeout é o timeout para operações de leitura/escrita nas conexões
-	ConnectionTimeout = 360 * time.Second
+	ConnectionTimeout = 60 * time.Second
 	// DefaultSessionTimeout é o timeout padrão para sessões se não especificado
 	DefaultSessionTimeout = 24 * time.Hour
 	// DefaultListenPort é a porta padrão de escuta se não especificada
@@ -32,7 +32,7 @@ const (
 )
 
 type Server struct {
-	pgtest   *PGTest
+	Pgtest   *PGTest
 	listener net.Listener
 	wg       sync.WaitGroup
 	startErr error
@@ -70,7 +70,7 @@ func NewServer(postgresHost string, postgresPort int, postgresDB, postgresUser, 
 
 	pgtest := NewPGTest(postgresHost, postgresPort, postgresDB, postgresUser, postgresPass, timeout, sessionTimeout, keepaliveInterval)
 	server := &Server{
-		pgtest: pgtest,
+		Pgtest: pgtest,
 	}
 
 	// Verifica se a porta já está em uso antes de tentar criar o listener
@@ -228,19 +228,19 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 		} else {
 			// Reconstruir bytes lidos
 			backend := s.createBackendWithPreRead(clientConn, 8, length, code)
-			s.processStartupMessage(backend, clientConn)
+			s.processConnectionStartupMessage(backend, clientConn)
 			return
 		}
 	} else {
 		// Reconstruir bytes do length
 		backend := s.createBackendWithPreRead(clientConn, 4, length, 0)
-		s.processStartupMessage(backend, clientConn)
+		s.processConnectionStartupMessage(backend, clientConn)
 		return
 	}
 
 	// Backend normal após tratar SSLRequest
 	backend := pgproto3.NewBackend(clientConn, clientConn)
-	s.processStartupMessage(backend, clientConn)
+	s.processConnectionStartupMessage(backend, clientConn)
 }
 
 // createBackendWithPreRead cria um backend reconstruindo bytes já lidos
@@ -254,7 +254,7 @@ func (s *Server) createBackendWithPreRead(clientConn net.Conn, dataSize int, len
 	return pgproto3.NewBackend(multiReader, clientConn)
 }
 
-// processStartupMessage processa a mensagem de startup do cliente e estabelece a sessão
+// processConnectionStartupMessage processa a mensagem de startup do cliente e estabelece a sessão
 //
 // Fluxo de Autenticação:
 // 1. Recebe StartupMessage do cliente (contém application_name e outros parâmetros)
@@ -273,23 +273,27 @@ func (s *Server) createBackendWithPreRead(clientConn net.Conn, dataSize int, len
 // IMPORTANTE: O cliente sempre passa por autenticação completa, mesmo quando
 // reutilizamos uma conexão PostgreSQL existente. Isso garante que o cliente
 // não percebe diferença entre uma conexão nova e uma reutilizada.
-func (s *Server) processStartupMessage(backend *pgproto3.Backend, clientConn net.Conn) {
+func (s *Server) processConnectionStartupMessage(backend *pgproto3.Backend, clientConn net.Conn) {
 	clientConn.SetDeadline(time.Now().Add(ConnectionTimeout))
 
-	startupMsg, err := backend.ReceiveStartupMessage()
+	params, err := getConnectionStartupParameters(backend)
 	if err != nil {
-		if err != io.EOF {
-			log.Printf("Error receiving startup message from client: %v", err)
-		}
+		return
+	}
+	// Extrai testID do application_name do cliente
+	// O mesmo application_name sempre resulta no mesmo testID
+	testID, err := protocol.ExtractTestID(params)
+	if err != nil {
+		errorBackend := pgproto3.NewBackend(clientConn, clientConn)
+		sendErrorToClient(errorBackend, err.Error())
 		return
 	}
 
-	params := make(map[string]string)
-	if sm, ok := startupMsg.(*pgproto3.StartupMessage); ok {
-		for k, v := range sm.Parameters {
-			params[k] = v
-		}
-	}
+	// Log para identificar qual teste/código está fazendo a conexão
+	// O testID identifica qual teste está conectando (ex: "test_commit_protection" = TestProtectionAgainstAccidentalCommit)
+	appName := protocol.ExtractAppname(params)
+	remoteAddr := clientConn.RemoteAddr().String()
+	logIfVerbose("[SERVER] Conexão estabelecida - testID=%s, application_name=%s, origem=%s", testID, appName, remoteAddr)
 
 	// Simula autenticação PostgreSQL: sempre solicita senha do cliente
 	// Isso garante que o cliente sempre passa pelo mesmo fluxo, independente
@@ -298,8 +302,6 @@ func (s *Server) processStartupMessage(backend *pgproto3.Backend, clientConn net
 		log.Printf("Error writing authentication request: %v", err)
 		return
 	}
-
-	clientConn.SetDeadline(time.Now().Add(ConnectionTimeout))
 
 	passwordMsg, err := backend.Receive()
 	if err != nil {
@@ -312,29 +314,11 @@ func (s *Server) processStartupMessage(backend *pgproto3.Backend, clientConn net
 		return
 	}
 
-	// Extrai testID do application_name do cliente
-	// O mesmo application_name sempre resulta no mesmo testID
-	testID, err := protocol.ExtractTestID(params)
-	if err != nil {
-		errorBackend := pgproto3.NewBackend(clientConn, clientConn)
-		sendErrorToClient(errorBackend, err.Error())
-		return
-	}
-
-	// Log para identificar qual teste/código está fazendo a conexão
-	// O testID identifica qual teste está conectando (ex: "test_commit_protection" = TestProtectionAgainstAccidentalCommit)
-	appName := params["application_name"]
-	if appName == "" {
-		appName = "(sem application_name)"
-	}
-	remoteAddr := clientConn.RemoteAddr().String()
-	logIfVerbose("[SERVER] Conexão estabelecida - testID=%s, application_name=%s, origem=%s", testID, appName, remoteAddr)
-
 	// Obtém ou cria sessão para este testID
 	// - Se já existe: reutiliza conexão PostgreSQL e transação existentes
 	// - Se não existe: cria nova conexão PostgreSQL e nova transação
 	// A conexão PostgreSQL é persistente e reutilizada para o mesmo testID
-	_, err = s.pgtest.GetOrCreateSession(testID)
+	_, err = s.Pgtest.GetOrCreateSession(testID)
 	if err != nil {
 		errorBackend := pgproto3.NewBackend(clientConn, clientConn)
 		sendErrorToClient(errorBackend, err.Error())
@@ -350,20 +334,20 @@ func (s *Server) processStartupMessage(backend *pgproto3.Backend, clientConn net
 	}
 
 	// Inicia proxy para encaminhar comandos entre cliente e PostgreSQL
-	s.startProxy(clientConn, testID, backend)
+	s.startProxy(testID, clientConn, backend)
 }
 
-// InterceptQuery delega para pgtest (usado pelo proxyConnection; lookup por testID).
-func (s *Server) InterceptQuery(testID string, query string) (string, error) {
-	return s.pgtest.InterceptQuery(testID, query)
-}
+func getConnectionStartupParameters(backend *pgproto3.Backend) (map[string]string, error) {
+	startupMsg, err := backend.ReceiveStartupMessage()
+	if err != nil && err != io.EOF {
+		return nil, fmt.Errorf("Error receiving startup message from client: %v", err)
+	}
 
-// GetSession retorna uma sessão pelo testID (usado principalmente em testes)
-func (s *Server) GetSession(testID string) *TestSession {
-	return s.pgtest.GetSession(testID)
-}
-
-// GetAllSessions retorna todas as sessões (usado principalmente em testes)
-func (s *Server) GetAllSessions() map[string]*TestSession {
-	return s.pgtest.GetAllSessions()
+	params := make(map[string]string)
+	if sm, ok := startupMsg.(*pgproto3.StartupMessage); ok {
+		for k, v := range sm.Parameters {
+			params[k] = v
+		}
+	}
+	return params, nil
 }

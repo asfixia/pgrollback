@@ -8,7 +8,6 @@
 package integration
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -99,7 +98,7 @@ func TestMain(m *testing.M) {
 func TestProtectionAgainstAccidentalCommit(t *testing.T) {
 	testID := "test_commit_protection"
 	pgtestDB := connectToPGTestProxy(t, testID)
-	defer pgtestDB.Close()
+	//defer pgtestDB.Close()
 	execBegin(t, pgtestDB, "First BEGIN: pgtest converts to SAVEPOINT (creates base transaction if needed)")
 	schema := getTestSchema()
 	tableName := postgres.QuoteQualifiedName(schema, "pgtest_commit_protection")
@@ -108,14 +107,20 @@ func TestProtectionAgainstAccidentalCommit(t *testing.T) {
 	assertTableRowCount(t, pgtestDB, tableName, 1, "Table has 1 row: CREATE TABLE + INSERT in base transaction")
 	execCommit(t, pgtestDB)
 	assertTableRowCount(t, pgtestDB, tableName, 1, "After COMMIT (RELEASE SAVEPOINT): table still exists with 1 row - COMMIT only releases savepoint, changes remain in base transaction")
-	pingWithTimeout(t, pgtestDB, 5*time.Second, true, "Connection check after COMMIT before second BEGIN")
+	execRollback(t, pgtestDB) //No transaction to rollback
+	assertTableRowCount(t, pgtestDB, tableName, 1, "No Transaction to rollback, table still exists with 1 row")
+
+	execCommit(t, pgtestDB)
+	execRollback(t, pgtestDB)
+	assertTableRowCount(t, pgtestDB, tableName, 1, "No change was made 1 row still exists")
+
 	execBegin(t, pgtestDB, "Second BEGIN after COMMIT: pgtest converts to SAVEPOINT (SavepointLevel becomes 1 again)")
 	pingWithTimeout(t, pgtestDB, 5*time.Second, false, "Connection check before second BEGIN")
 	insertOneRow(t, pgtestDB, tableName, "test_value", "Insert row in second transaction after COMMIT")
 	assertTableRowCount(t, pgtestDB, tableName, 2, "Table has 2 rows after INSERT in second transaction")
 	pingWithTimeout(t, pgtestDB, 5*time.Second, true, "Connection check after INSERT in second transaction")
 	postgresDBDirect := connectToRealPostgres(t)
-	defer postgresDBDirect.Close()
+	//defer postgresDBDirect.Close()
 	pingWithTimeout(t, postgresDBDirect, 5*time.Second, false)
 	assertTableDoesNotExist(t, postgresDBDirect, tableName, "Table does not exist in real PostgreSQL - data only exists in pgtest transaction (not committed)")
 	execRollback(t, pgtestDB)
@@ -124,6 +129,7 @@ func TestProtectionAgainstAccidentalCommit(t *testing.T) {
 	pingWithTimeout(t, postgresDBDirect, 5*time.Second, false)
 	assertTableDoesNotExist(t, postgresDBDirect, tableName, "After pgtest rollback: table does not exist in real PostgreSQL - base transaction was rolled back")
 	assertTableDoesNotExist(t, pgtestDB, tableName, "After pgtest rollback: table does not exist in pgtest - CREATE TABLE was reverted (new empty transaction created)")
+	t.Logf("meupirugluglu: %s", tableName)
 }
 
 func TestProtectionAgainstAccidentalRollback(t *testing.T) {
@@ -299,6 +305,44 @@ func TestTransactionPersistenceAcrossReconnections(t *testing.T) {
 	execPgtestRollback(t, pgtestDB2)
 }
 
+// TestResetSessionPingBeforeQuery reproduces the response-attribution bug: after full rollback,
+// db.Query(tableExistenceQuery) triggers ResetSession (which sends "-- ping") then the query.
+// This test uses a single connection to rule out pool reordering and asserts we get exactly
+// one row with value 0 or 1 (table existence), not the ping response.
+func TestResetSessionPingBeforeQuery(t *testing.T) {
+	testID := "test_reset_session_ping"
+	db := connectToPGTestProxySingleConn(t, testID)
+	defer db.Close()
+
+	schema := getTestSchema()
+	tableName := postgres.QuoteQualifiedName(schema, "pgtest_nonexistent_for_repro")
+	// Table is never created; we expect existence = 0.
+	query := fmt.Sprintf("SELECT CASE WHEN to_regclass('%s') IS NOT NULL THEN 1 ELSE 0 END", tableName)
+
+	execPgTestFullRollback(t, db)
+	// Immediately after full rollback: next use of db will do ResetSession (Ping) then our query.
+	rows, err := db.Query(query)
+	if err != nil {
+		t.Fatalf("query after full rollback failed: %v", err)
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		t.Fatalf("expected exactly one row (table existence), got 0 (possible wrong response attribution)")
+	}
+	var val int
+	if err := rows.Scan(&val); err != nil {
+		t.Fatalf("scan table existence: %v", err)
+	}
+	if val != 0 && val != 1 {
+		t.Fatalf("expected 0 or 1, got %d (possible wrong response attribution)", val)
+	}
+	if rows.Next() {
+		t.Fatalf("expected exactly one row, got more")
+	}
+	t.Logf("SUCCESS: got one row with value %d after full rollback", val)
+}
+
 func TestTransactionHandling(t *testing.T) {
 	testID := "test_transaction_handling"
 	pgtestDB := connectToPGTestProxy(t, testID)
@@ -319,8 +363,8 @@ func TestTransactionHandling(t *testing.T) {
 		execRollbackOrFail(t, pgtestDB)
 		assertTableRowCount(t, pgtestDB, tableName, 0, "Basic BEGIN/COMMIT works correctly")
 		execPgTestFullRollback(t, pgtestDB)
-		assertTableDoesNotExist(t, pgtestDB, tableName, "Table should not exist after pgtest rollback")
 		pingWithTimeout(t, pgtestDB, 5*time.Second, false, "Table should not exist after pgtest rollback")
+		assertTableDoesNotExist(t, pgtestDB, tableName, "Table should not exist after pgtest rollback")
 		t.Log("SUCCESS: insert_row_and_rollback correctly")
 	})
 	execPgTestFullRollback(t, pgtestDB)
@@ -330,10 +374,12 @@ func TestTransactionHandling(t *testing.T) {
 		createTableWithValueColumn(t, pgtestDB, tableName)
 		execBegin(t, pgtestDB, "")
 		insertOneRow(t, pgtestDB, tableName, "charlie", "insert row before explicit savepoint test")
-		execSavepoint(t, pgtestDB, "sp1")
+		assertTableRowCount(t, pgtestDB, tableName, 1, "Rollback must return the row quantity to 1")
+		execSavepoint(t, pgtestDB, "pgtsp1")
+		assertTableRowCount(t, pgtestDB, tableName, 1, "Rollback must return the row quantity to 1")
 		insertOneRow(t, pgtestDB, tableName, "david", "insert row after explicit savepoint to test rollback to savepoint")
 		assertTableRowCount(t, pgtestDB, tableName, 2, "Inserted row works correctly")
-		execRollbackToSavepoint(t, pgtestDB, "sp1")
+		execRollbackToSavepoint(t, pgtestDB, "pgtsp1")
 		assertTableRowCount(t, pgtestDB, tableName, 1, "Rollback must return the row quantity to 1")
 		execPgTestFullRollback(t, pgtestDB)
 		t.Log("SUCCESS: Explicit savepoint works correctly")
@@ -350,15 +396,38 @@ func TestTransactionHandling(t *testing.T) {
 		execSavepoint(t, pgtestDB, "b")
 		insertOneRow(t, pgtestDB, tableName, "nested_3", "insert third row after second savepoint in nested savepoints test")
 		execRollbackToSavepoint(t, pgtestDB, "b")
+		execRollbackToSavepoint(t, pgtestDB, "b")
 		assertTableRowCount(t, pgtestDB, tableName, 2, "Rollback to b must return the row quantity to 2")
 		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value IN ('nested_1', 'nested_2')", tableName), 2, "Nested SAVEPOINTs work correctly")
 		execCommit(t, pgtestDB)
 		assertTableRowCount(t, pgtestDB, tableName, 2, "Rollback to b must return the row quantity to 2")
-		execRollbackToSavepoint(t, pgtestDB, "b")
-		execRollbackToSavepoint(t, pgtestDB, "a")
+		execRollbackToInvalidSavepoint(t, pgtestDB, "b")
+		assertTableRowCount(t, pgtestDB, tableName, 2, "Rollback to b must return the row quantity to 2")
+		execRollbackToInvalidSavepoint(t, pgtestDB, "a")
 		assertTableRowCount(t, pgtestDB, tableName, 2, "Rollback to b must return the row quantity to 2")
 		execPgTestFullRollback(t, pgtestDB)
 		t.Log("SUCCESS: Nested savepoints works correctly")
+	})
+	execPgTestFullRollback(t, pgtestDB)
+
+	// 4b. Same as nested_savepoints but RELEASE SAVEPOINT b instead of COMMIT; then verify we can still ROLLBACK TO SAVEPOINT a
+	t.Run("nested_savepoints_release_then_rollback_to_a", func(t *testing.T) {
+		createTableWithValueColumn(t, pgtestDB, tableName)
+		execBegin(t, pgtestDB, "")
+		insertOneRow(t, pgtestDB, tableName, "nested_1", "insert first row")
+		execSavepoint(t, pgtestDB, "a")
+		insertOneRow(t, pgtestDB, tableName, "nested_2", "insert second row after savepoint a")
+		execSavepoint(t, pgtestDB, "b")
+		insertOneRow(t, pgtestDB, tableName, "nested_3", "insert third row after savepoint b")
+		execRollbackToSavepoint(t, pgtestDB, "b")
+		execRollbackToSavepoint(t, pgtestDB, "b")
+		assertTableRowCount(t, pgtestDB, tableName, 2, "After rollback to b twice we have 2 rows")
+		execReleaseSavepoint(t, pgtestDB, "b")
+		assertTableRowCount(t, pgtestDB, tableName, 2, "After RELEASE SAVEPOINT b we still have 2 rows")
+		execRollbackToSavepoint(t, pgtestDB, "a")
+		assertTableRowCount(t, pgtestDB, tableName, 1, "After ROLLBACK TO SAVEPOINT a we have 1 row")
+		execPgTestFullRollback(t, pgtestDB)
+		t.Log("SUCCESS: RELEASE SAVEPOINT b then ROLLBACK TO SAVEPOINT a works correctly")
 	})
 	execPgTestFullRollback(t, pgtestDB)
 
@@ -370,8 +439,8 @@ func TestTransactionHandling(t *testing.T) {
 		execSavepoint(t, pgtestDB, "sp_release")
 		execReleaseSavepoint(t, pgtestDB, "sp_release")
 		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'release_test'", tableName), 1, "RELEASE SAVEPOINT works correctly")
-		execReleaseSavepoint(t, pgtestDB, "sp_release")
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'release_test'", tableName), 1, "RELEASE SAVEPOINT works correctly")
+		execReleaseSavepointExpectError(t, pgtestDB, "sp_release")
+		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'release_test'", tableName), 1, "State unchanged after invalid RELEASE")
 		execCommit(t, pgtestDB)
 		execPgTestFullRollback(t, pgtestDB)
 		t.Log("SUCCESS: Release savepoint works correctly")
@@ -397,7 +466,7 @@ func TestTransactionHandling(t *testing.T) {
 
 	// 7. Teste comportamento após erro SQL (transação abortada)
 	t.Run("error_handling_aborted_transaction", func(t *testing.T) {
-		dropTableBestEffort(t, pgtestDB, tableName)
+		dropTableIfExists(t, pgtestDB, tableName)
 		createTableWithValueColumn(t, pgtestDB, tableName)
 
 		execBegin(t, pgtestDB, "")
@@ -408,12 +477,10 @@ func TestTransactionHandling(t *testing.T) {
 		// Tenta inserir valor duplicado (erro esperado)
 		insertDuplicateRow(t, pgtestDB, tableName, 1, "duplicate")
 
-		// Após erro, a transação está abortada
-		// Tenta inserir outro valor - deve falhar porque a transação está abortada
-		// insertOneRow vai fazer t.Fatalf se falhar (esperamos que falhe aqui)
-		insertOneRow(t, pgtestDB, tableName, "after_error", "insert after error should fail because transaction is aborted")
+		// Com pgtest SafeExec, um comando que falha só reverte o guard savepoint; a transação principal
+		// segue válida. Aqui apenas fazemos ROLLBACK e verificamos que tudo foi revertido.
 
-		// ROLLBACK para limpar a transação abortada
+		// ROLLBACK para limpar e reverter todas as mudanças
 		execRollbackOrFail(t, pgtestDB)
 
 		// Verifica que 'before_error' não existe (foi revertido pelo ROLLBACK)
@@ -457,9 +524,6 @@ func TestInvalidStatements(t *testing.T) {
 	}
 
 	createTableWithValueColumn(t, pgtestDB, nonExistTableName)
-	defer func() {
-		dropTableBestEffort(t, pgtestDB, nonExistTableName)
-	}()
 
 	// Testa query com atributo inexistente
 	_, err = pgtestDB.Exec(fmt.Sprintf("SELECT nonexistent_column FROM %s", nonExistTableName))
@@ -500,15 +564,7 @@ func TestInvalidStatements(t *testing.T) {
 		}
 	}
 
-	// Verifica que a conexão ainda está válida após os erros
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := pgtestDB.PingContext(ctx); err != nil {
-		t.Errorf("Connection should still be valid after errors, but ping failed: %v", err)
-	} else {
-		t.Log("SUCCESS: Connection remains valid after handling invalid statements")
-	}
-
+	pingWithTimeout(t, pgtestDB, 5*time.Second, false, "Connection remains valid after handling invalid statements")
 	// Limpa a transação
 	execPgtestRollback(t, pgtestDB)
 }

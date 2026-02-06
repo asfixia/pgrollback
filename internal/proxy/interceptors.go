@@ -1,10 +1,15 @@
 package proxy
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"time"
+)
+
+const (
+	DEFAULT_SELECT_ONE    = "-- ping"
+	DEFAULT_SELECT_ZERO   = "-- ping"
+	FULLROLLBACK_SENTINEL = "-- fullrollback" // "pgtest rollback" response: single CommandComplete+ReadyForQuery, no DB
 )
 
 // InterceptQuery intercepta e modifica queries específicas antes da execução
@@ -24,7 +29,7 @@ func (p *PGTest) InterceptQuery(testID string, query string) (string, error) {
 		return p.handleCommit(testID)
 	}
 
-	if strings.HasPrefix(queryUpper, "ROLLBACK") {
+	if strings.HasPrefix(queryUpper, "ROLLBACK") && !strings.Contains(queryUpper, "SAVEPOINT") {
 		return p.handleRollback(testID)
 	}
 
@@ -47,7 +52,7 @@ func (p *PGTest) handlePGTestCommand(testID string, query string) (string, error
 		if err != nil {
 			return "", err
 		}
-		return "SELECT 1", nil
+		return DEFAULT_SELECT_ONE, nil
 
 	case "rollback":
 		return p.RollbackBaseTransaction(testID)
@@ -85,25 +90,7 @@ func (p *PGTest) handleBegin(testID string) (string, error) {
 	if session == nil {
 		return "", fmt.Errorf("Session not found '%s'", testID)
 	}
-	session.mu.Lock()
-	defer session.mu.Unlock()
-
-	// Garantia de segurança: se não houver transação base, cria uma primeiro
-	// Isso pode acontecer se a transação foi commitada/rollback mas a sessão ainda existe
-	// Em testes unitários (session.DB == nil ou conn nil), BeginTx é no-op
-	if session.DB != nil && !session.DB.HasActiveTransaction() {
-		if err := session.DB.beginTx(context.Background()); err != nil {
-			return "", fmt.Errorf("failed to begin base transaction: %w", err)
-		}
-	}
-
-	// Cada BEGIN cria um novo savepoint, permitindo rollback aninhado
-	// Usa prefixo "pgtest_v_" para garantir que não conflite com savepoints criados pelo usuário
-	session.SavepointLevel++
-	savepointName := fmt.Sprintf("pgtest_v_%d", session.SavepointLevel)
-	session.Savepoints = append(session.Savepoints, savepointName)
-
-	return fmt.Sprintf("SAVEPOINT %s", savepointName), nil
+	return session.handleBegin(testID)
 }
 
 // handleCommit converte COMMIT em RELEASE SAVEPOINT
@@ -112,18 +99,7 @@ func (p *PGTest) handleCommit(testID string) (string, error) {
 	if session == nil {
 		return "", fmt.Errorf("Transaction was not found to do a Commit on '%s'", testID)
 	}
-	session.mu.Lock()
-	defer session.mu.Unlock()
-
-	if session.SavepointLevel > 0 {
-		savepointName := session.Savepoints[len(session.Savepoints)-1]
-		session.Savepoints = session.Savepoints[:len(session.Savepoints)-1]
-		session.SavepointLevel--
-
-		return fmt.Sprintf("RELEASE SAVEPOINT %s", savepointName), nil
-	}
-
-	return "SELECT 1", nil
+	return session.handleCommit(testID)
 }
 
 // handleRollback converte ROLLBACK em ROLLBACK TO SAVEPOINT
@@ -138,22 +114,10 @@ func (p *PGTest) handleCommit(testID string) (string, error) {
 // - O rollback não afeta outras conexões que compartilham a mesma sessão/testID
 func (p *PGTest) handleRollback(testID string) (string, error) {
 	session := p.GetSession(testID)
-	session.mu.Lock()
-	defer session.mu.Unlock()
-
-	if session.SavepointLevel > 0 {
-		savepointName := session.Savepoints[len(session.Savepoints)-1]
-		session.Savepoints = session.Savepoints[:len(session.Savepoints)-1]
-		session.SavepointLevel--
-
-		// Faz rollback até o savepoint e depois o remove (RELEASE)
-		// Isso reverte todas as mudanças feitas após este savepoint
-		return fmt.Sprintf("ROLLBACK TO SAVEPOINT %s; RELEASE SAVEPOINT %s", savepointName, savepointName), nil
+	if session == nil {
+		return "", fmt.Errorf("Error no session for ID: '%s'", testID)
 	}
-
-	// Não há savepoints para reverter
-	// Retorna sucesso sem fazer nada (não há nada para reverter desta conexão)
-	return "SELECT 1", nil
+	return session.handleRollback(testID)
 }
 
 // buildStatusResultSet constrói uma query SELECT para status de uma sessão
@@ -162,17 +126,7 @@ func (p *PGTest) buildStatusResultSet(testID string) (string, error) {
 	if session == nil {
 		return "", fmt.Errorf("Session with testID '%s', was not found", testID)
 	}
-
-	session.mu.RLock()
-	active := session.DB != nil && session.DB.HasActiveTransaction()
-	level := session.SavepointLevel
-	createdAt := session.CreatedAt.Format(time.RFC3339)
-	session.mu.RUnlock()
-
-	return fmt.Sprintf(
-		"SELECT '%s' AS test_id, %t AS active, %d AS level, '%s' AS created_at",
-		p.GetTestID(session), active, level, createdAt,
-	), nil
+	return session.buildStatusResultSet(testID)
 }
 
 // buildListResultSet constrói uma query SELECT para listar todas as sessões
@@ -185,8 +139,11 @@ func (p *PGTest) buildListResultSet() (string, error) {
 	var values []string
 	for testID, session := range sessions {
 		session.mu.RLock()
-		active := session.DB != nil && session.DB.HasActiveTransaction()
-		level := session.SavepointLevel
+		if session.DB == nil {
+			return "", fmt.Errorf("Invalid session testID '%s'", testID)
+		}
+		active := session.DB.HasActiveTransaction()
+		level := session.DB.SavepointLevel
 		createdAt := session.CreatedAt.Format(time.RFC3339)
 		session.mu.RUnlock()
 

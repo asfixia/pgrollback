@@ -13,12 +13,11 @@ import (
 )
 
 type TestSession struct {
-	DB             *realSessionDB // abstraction over connection + transaction; use DB.Query/Exec for all commands
-	SavepointLevel int
-	Savepoints     []string
-	CreatedAt      time.Time
-	LastActivity   time.Time
-	mu             sync.RWMutex
+	DB           *realSessionDB // abstraction over connection + transaction; use DB.Query/Exec for all commands
+	TestID       string
+	CreatedAt    time.Time
+	LastActivity time.Time
+	mu           sync.RWMutex
 }
 
 type PGTest struct {
@@ -35,6 +34,8 @@ type PGTest struct {
 }
 
 func (p *PGTest) GetTestID(session *TestSession) string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	for testID, s := range p.SessionsByTestID {
 		if s == session {
 			return testID
@@ -139,16 +140,14 @@ func (p *PGTest) createNewSession(testID string) (*TestSession, error) {
 	}
 
 	db := newSessionDB(conn, tx)
-	if p.KeepaliveInterval > 0 {
-		db.startKeepalive(p.KeepaliveInterval)
-	}
+	//if p.KeepaliveInterval > 0 {
+	//	db.startKeepalive(p.KeepaliveInterval)
+	//}
 
 	session := &TestSession{
-		DB:             db,
-		SavepointLevel: 0,
-		Savepoints:     []string{},
-		CreatedAt:      time.Now(),
-		LastActivity:   time.Now(),
+		DB:           db,
+		CreatedAt:    time.Now(),
+		LastActivity: time.Now(),
 	}
 
 	return session, nil
@@ -194,10 +193,6 @@ func (p *PGTest) DestroySession(testID string) error {
 		session.DB = nil
 	}
 
-	// Reseta savepoints (todos foram revertidos com o ROLLBACK)
-	session.SavepointLevel = 0
-	session.Savepoints = []string{}
-
 	delete(p.SessionsByTestID, testID)
 	return nil
 }
@@ -208,12 +203,7 @@ func (p *PGTest) RollbackBaseTransaction(testID string) (string, error) {
 	if session == nil {
 		return "", fmt.Errorf("session not found for test_id: '%s'", testID)
 	}
-	session.mu.Lock()
-	defer session.mu.Unlock()
-	if session.DB == nil {
-		return "", fmt.Errorf("session DB is nil")
-	}
-	return "SELECT 1", session.DB.startNewTx(context.Background())
+	return session.RollbackBaseTransaction(testID)
 }
 
 // RollbackSession é um alias para DestroySession mantido para compatibilidade.
@@ -251,6 +241,8 @@ func (p *PGTest) CleanupExpiredSessions() int {
 }
 
 func (p *PGTest) getAdvisoryLockKey(session *TestSession) int64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	hash := fnv.New64a()
 	hash.Write([]byte("pgtest_" + p.GetTestID(session)))
 	return int64(hash.Sum64())
@@ -289,19 +281,80 @@ func (p *PGTest) ExecuteWithLock(session *TestSession, query string) error {
 	return err
 }
 
-// GetSavepointLevel retorna o nível atual de savepoint da sessão
-func (s *TestSession) GetSavepointLevel() int {
+// handleBegin converte BEGIN em SAVEPOINT
+//
+// Comportamento:
+// - Se não houver transação base, cria uma primeiro (garantia de segurança)
+// - Cada BEGIN cria um novo savepoint, permitindo rollback aninhado
+// - O primeiro BEGIN (SavepointLevel = 0) marca o "ponto de início" desta conexão/cliente
+// - Savepoints subsequentes permitem rollback parcial dentro da mesma conexão
+//
+// Caso de uso PHP:
+// - PHP conecta → executa BEGIN → cria savepoint pgtest_v_1 (ponto de início)
+// - PHP faz comandos → executa BEGIN novamente → cria savepoint pgtest_v_2
+// - PHP executa ROLLBACK → faz rollback até pgtest_v_2 (não afeta pgtest_v_1)
+// - PHP desconecta → próxima conexão PHP com mesmo testID pode continuar de onde parou
+func (s *TestSession) handleBegin(testID string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.SavepointLevel
+	if s.DB == nil {
+		return "", fmt.Errorf("Begin TestSession has no connection to DB on ID: %s", testID)
+	}
+	return s.DB.handleBegin(testID)
 }
 
-// GetSavepoints retorna a lista de savepoints da sessão
-func (s *TestSession) GetSavepoints() []string {
+// handleCommit converte COMMIT em RELEASE SAVEPOINT
+func (s *TestSession) handleCommit(testID string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	// Retorna uma cópia para evitar modificações externas
-	result := make([]string, len(s.Savepoints))
-	copy(result, s.Savepoints)
-	return result
+	if s.DB == nil {
+		return "", fmt.Errorf("Commit TestSession has no connection to DB on ID: %s", testID)
+	}
+	return s.DB.handleCommit(testID)
 }
+
+// handleRollback converte ROLLBACK em ROLLBACK TO SAVEPOINT
+//
+// Comportamento:
+// - Se SavepointLevel > 0: faz rollback até o último savepoint e o remove
+// - Se SavepointLevel = 0: não há savepoints para reverter, apenas retorna sucesso
+//
+// Caso de uso PHP:
+// - PHP executa ROLLBACK → reverte até o último savepoint criado por esta conexão
+// - Isso permite que cada conexão/cliente tenha seu próprio rollback isolado
+// - O rollback não afeta outras conexões que compartilham a mesma sessão/testID
+func (s *TestSession) handleRollback(testID string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.DB == nil {
+		return "", fmt.Errorf("Rollback TestSession has no connection to DB on ID: %s", testID)
+	}
+	return s.DB.handleRollback(testID)
+}
+
+// RollbackBaseTransaction runs ROLLBACK and begins a new transaction on the session (used by "pgtest rollback").
+// Returns FULLROLLBACK_SENTINEL so the proxy sends exactly one CommandComplete+ReadyForQuery without
+// forwarding to the DB, avoiding response attribution issues with the next query (e.g. ResetSession ping).
+func (s *TestSession) RollbackBaseTransaction(testID string) (string, error) {
+	return FULLROLLBACK_SENTINEL, s.DB.startNewTx(context.Background())
+}
+
+// buildStatusResultSet constrói uma query SELECT para status de uma sessão
+func (s *TestSession) buildStatusResultSet(testID string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.DB == nil {
+		return "", fmt.Errorf("Session with testID '%s', doesnt have a real connection.", testID)
+	}
+	return s.DB.buildStatusResultSet(s.CreatedAt, testID)
+}
+
+//// GetSavepoints retorna a lista de savepoints da sessão
+//func (s *TestSession) GetSavepoints() []string {
+//	s.mu.RLock()
+//	defer s.mu.RUnlock()
+//	// Retorna uma cópia para evitar modificações externas
+//	result := make([]string, len(s.Savepoints))
+//	copy(result, s.Savepoints)
+//	return result
+//}

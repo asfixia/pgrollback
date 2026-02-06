@@ -75,7 +75,6 @@ func TestSelect1AsUm(t *testing.T) {
 	db.SetConnMaxLifetime(time.Second * 30)
 	db.SetMaxOpenConns(1)
 
-	// Executa SELECT 1 as um
 	queryTimeout := cfg.Test.QueryTimeout.Duration
 	if queryTimeout == 0 {
 		queryTimeout = 5 * time.Second

@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"log"
+	"os"
 
 	"pgtest/pkg/protocol"
 	"pgtest/pkg/sql"
@@ -16,6 +17,9 @@ import (
 func (p *proxyConnection) SendSelectResults(rows pgx.Rows) error {
 	fieldDescs := rows.FieldDescriptions()
 	fields := protocol.ConvertFieldDescriptions(fieldDescs)
+	if os.Getenv("PGTEST_LOG_MESSAGE_ORDER") == "1" {
+		log.Printf("[MSG_ORDER] SEND RowDescription: %d cols", len(fields))
+	}
 	p.backend.Send(&pgproto3.RowDescription{Fields: fields})
 
 	rowCount := 0
@@ -26,7 +30,10 @@ func (p *proxyConnection) SendSelectResults(rows pgx.Rows) error {
 		rawValues := rows.RawValues()
 		p.backend.Send(&pgproto3.DataRow{Values: rawValues})
 	}
-
+	if os.Getenv("PGTEST_LOG_MESSAGE_ORDER") == "1" {
+		log.Printf("[MSG_ORDER] SEND DataRows: %d", rowCount)
+		log.Printf("[MSG_ORDER] SEND CommandComplete: SELECT %d", rowCount)
+	}
 	p.backend.Send(&pgproto3.CommandComplete{CommandTag: []byte(fmt.Sprintf("SELECT %d", rowCount))})
 	if err := p.backend.Flush(); err != nil {
 		return fmt.Errorf("falha no flush dos resultados do select: %w", err)

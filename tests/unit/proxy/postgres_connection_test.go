@@ -6,8 +6,15 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib" // Driver para database/sql
 	"pgtest/internal/config"
+
+	_ "github.com/jackc/pgx/v5/stdlib" // Driver para database/sql
+)
+
+const (
+	DEFAULT_SELECT_ONE    = "-- ping"
+	DEFAULT_SELECT_ZERO   = "-- ping"
+	FULLROLLBACK_SENTINEL = "-- fullrollback"
 )
 
 // TestPostgreSQLConnection testa se conseguimos conectar ao PostgreSQL real

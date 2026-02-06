@@ -54,12 +54,12 @@ func ParseLogLevel(level string) LogLevel {
 
 // Logger gerencia mensagens de log com níveis configuráveis
 type Logger struct {
-	level      LogLevel
-	logger     *log.Logger
-	mu         sync.RWMutex
-	output     io.Writer
-	prefix     string
-	flags      int
+	level  LogLevel
+	logger *log.Logger
+	mu     sync.RWMutex
+	output io.Writer
+	prefix string
+	flags  int
 }
 
 var (
@@ -136,7 +136,7 @@ func (l *Logger) log(level LogLevel, format string, args ...interface{}) {
 	if !l.shouldLog(level) {
 		return
 	}
-	
+
 	levelStr := level.String()
 	message := fmt.Sprintf(format, args...)
 	l.logger.Printf("[%s] %s", levelStr, message)

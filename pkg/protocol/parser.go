@@ -4,6 +4,13 @@ import (
 	"regexp"
 )
 
+func ExtractAppname(params map[string]string) string {
+	if params == nil || params["application_name"] == "" {
+		return "(sem application_name)"
+	}
+	return params["application_name"]
+}
+
 func ExtractTestID(params map[string]string) (string, error) {
 	appName := params["application_name"]
 

@@ -96,7 +96,7 @@ func TestServerAuthenticationHandshake(t *testing.T) {
 	}
 
 	// Verifica se a sessão foi criada com o testID correto
-	session := proxyServer.GetSession("test_auth")
+	session := proxyServer.Pgtest.GetSession("test_auth")
 	if session == nil {
 		t.Log("Session 'test_auth' not found (this is expected if application_name extraction works correctly)")
 	}
@@ -196,7 +196,7 @@ func TestServerAuthenticationHandshake_DefaultAppName(t *testing.T) {
 	}
 
 	// Verifica se a sessão foi criada com testID "default"
-	session := proxyServer.GetSession("default")
+	session := proxyServer.Pgtest.GetSession("default")
 	if session == nil {
 		t.Error("Session with testID 'default' should be created")
 	}

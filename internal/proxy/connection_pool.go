@@ -40,30 +40,11 @@ func newConnectionForTestID(host string, port int, database, user, password stri
 		return nil, err
 	}
 
-	pingCtx, pingCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer pingCancel()
-	if err := conn.Ping(pingCtx); err != nil {
-		conn.Close(context.Background())
-		return nil, fmt.Errorf("failed to verify PostgreSQL connection (ping failed): %w", err)
-	}
-
 	timeoutMs := int64(sessionTimeout / time.Millisecond)
-	_, err = conn.Exec(context.Background(), fmt.Sprintf("SET idle_in_transaction_session_timeout = %d", timeoutMs))
+	_, err = conn.Exec(context.Background(), fmt.Sprintf("SET statement_timeout = '0'; SET idle_session_timeout = '0'; SET idle_in_transaction_session_timeout = %d", timeoutMs))
 	if err != nil {
 		conn.Close(context.Background())
 		return nil, fmt.Errorf("failed to set session timeout: %w", err)
-	}
-
-	_, err = conn.Exec(context.Background(), "SET idle_session_timeout = '0'")
-	if err != nil {
-		conn.Close(context.Background())
-		return nil, fmt.Errorf("failed to set session timeout: %w", err)
-	}
-
-	_, err = conn.Exec(context.Background(), "SET statement_timeout = '0'")
-	if err != nil {
-		conn.Close(context.Background())
-		return nil, fmt.Errorf("failed to set statement timeout: %w", err)
 	}
 
 	return conn, nil

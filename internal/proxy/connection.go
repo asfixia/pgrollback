@@ -26,43 +26,22 @@ func printRLog(format string, v interface{}) {
 	log.Printf(format, printR(v))
 }
 
-// sessionProvider provides session lookup and query interception by testID.
-// Implemented by *Server; the connection uses it with its testID to reach the TestSession.
-type sessionProvider interface {
-	GetSession(testID string) *TestSession
-	InterceptQuery(testID string, query string) (string, error)
-}
-
 // proxyConnection gerencia uma conexão proxy entre cliente e PostgreSQL
 // Intercepta apenas SQL (Query) para modificar, mantendo resto transparente
 type proxyConnection struct {
 	clientConn net.Conn
 	backend    *pgproto3.Backend
-	testID     string
-	provider   sessionProvider // used with testID to get session / intercept queries
-	lastQuery  string          // Última query parseada (para conversão Parse->Execute em Query simples)
-	//inExtendedQuery bool   // Indica se estamos processando Extended Query (Parse/Bind/Execute)
-	mu sync.Mutex
-}
-
-// getSession returns the TestSession for this connection's testID (no parameters needed).
-func (p *proxyConnection) getSession() *TestSession {
-	return p.provider.GetSession(p.testID)
-}
-
-// interceptQuery runs query interception for this connection's session (uses p.testID internally).
-func (p *proxyConnection) interceptQuery(query string) (string, error) {
-	return p.provider.InterceptQuery(p.testID, query)
+	server     *Server
+	mu         sync.Mutex
 }
 
 // startProxy inicia o proxy usando a sessão existente
 // A sessão já tem conexão PostgreSQL autenticada e transação ativa
-func (server *Server) startProxy(clientConn net.Conn, testID string, backend *pgproto3.Backend) {
+func (server *Server) startProxy(testID string, clientConn net.Conn, backend *pgproto3.Backend) {
 	proxy := &proxyConnection{
 		clientConn: clientConn,
 		backend:    backend,
-		testID:     testID,
-		provider:   server, // Server implements sessionProvider
+		server:     server,
 	}
 
 	if err := proxy.sendInitialProtocolMessages(); err != nil {
@@ -71,7 +50,7 @@ func (server *Server) startProxy(clientConn net.Conn, testID string, backend *pg
 	}
 
 	// Inicia o loop de mensagens refatorado em message_loop.go
-	proxy.RunMessageLoop()
+	proxy.RunMessageLoop(testID)
 }
 
 // sendInitialProtocolMessages envia as mensagens iniciais do protocolo PostgreSQL

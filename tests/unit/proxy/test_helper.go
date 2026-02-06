@@ -121,13 +121,6 @@ func ensurePortIsAvailable(t *testing.T, host string, port int) {
 	}
 }
 
-// startProxyServerInBackground está deprecated - NewServer agora inicia automaticamente
-// Mantido para compatibilidade, mas não é mais necessário
-func startProxyServerInBackground(t *testing.T, proxyServer *proxy.Server, host string, port int, ctx context.Context) {
-	// Esta função não faz mais nada, pois NewServer já inicia o servidor
-	// Mantida apenas para compatibilidade com código que ainda a chama
-}
-
 func waitForProxyServerToListen(t *testing.T, host string, port int) {
 	maxAttempts := 20
 	for i := 0; i < maxAttempts; i++ {
@@ -161,22 +154,18 @@ func pingWithTimeout(t *testing.T, db *sql.DB, timeout time.Duration) {
 	}
 }
 
-// QueryContextLastResult executa múltiplas declarações SQL usando Exec
-// e retorna apenas o último SELECT que retorna resultados, similar ao QueryContext
-// mas ao invés de retornar o primeiro result set, retorna o último.
-// Esta função processa todos os result sets mas retorna apenas o último que tem linhas.
+// QueryContextLastResult runs all statements in the query (multi-statement Exec)
+// and returns the last result set only. The last result may have zero or more rows.
+// It does not detect "last with results" — it runs all commands and returns the last result.
 func QueryContextLastResult(t *testing.T, db *sql.DB, ctx context.Context, query string) (*sql.Rows, error) {
-	// Obtém a conexão pgx subjacente do database/sql.DB
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get connection: %w", err)
 	}
 	defer conn.Close()
 
-	// Obtém a conexão pgx nativa através do driver
 	var pgxConn *pgx.Conn
 	err = conn.Raw(func(driverConn interface{}) error {
-		// O driver stdlib do pgx expõe a conexão através de uma interface
 		type pgxDriverConn interface {
 			Conn() *pgx.Conn
 		}
@@ -190,91 +179,50 @@ func QueryContextLastResult(t *testing.T, db *sql.DB, ctx context.Context, query
 		return nil, fmt.Errorf("failed to extract pgx connection: %w", err)
 	}
 
-	// Usa pgconn.Exec() para processar múltiplos result sets
-	// Isso permite processar todos os comandos e retornar apenas o último SELECT que tem linhas
+	// Run all commands once (side effects apply)
 	pgConn := pgxConn.PgConn()
 	mrr := pgConn.Exec(ctx, query)
 	defer mrr.Close()
 
-	// Parseia a query para encontrar os comandos SELECT usando o parser existente
-	commands := sqlpkg.SplitCommands(query)
-
-	// Identifica quais comandos são SELECTs
-	var selectCommands []string
-	for _, cmd := range commands {
-		if sqlpkg.IsSelect(cmd) {
-			selectCommands = append(selectCommands, cmd)
-		}
-	}
-
-	// Processa todos os result sets para identificar qual é o último SELECT que tem linhas
-	var lastSelectQuery string
-	selectIndex := 0
-
+	// Consume all result sets so the protocol is in a consistent state
 	for mrr.NextResult() {
 		rr := mrr.ResultReader()
-		if rr == nil {
-			continue
-		}
-
-		fieldDescs := rr.FieldDescriptions()
-		if len(fieldDescs) > 0 {
-			// É um SELECT - verifica se tem linhas
-			hasRows := false
-			for rr.NextRow() {
-				hasRows = true
-				break // Apenas verifica se tem pelo menos uma linha
-			}
-
-			// Se tem linhas e é um SELECT válido, armazena como último
-			if hasRows && selectIndex < len(selectCommands) {
-				lastSelectQuery = selectCommands[selectIndex]
-			}
-			selectIndex++
-		}
-
-		// Sempre fecha o ResultReader
-		_, err := rr.Close()
-		if err != nil {
-			return nil, fmt.Errorf("error closing result reader: %w", err)
+		if rr != nil {
+			_, _ = rr.Close()
 		}
 	}
-
-	// Verifica erros finais
 	if err := mrr.Close(); err != nil {
 		return nil, fmt.Errorf("error processing multiple command results: %w", err)
 	}
 
-	// Se encontrou um último SELECT com linhas, executa apenas ele usando QueryContext
-	if lastSelectQuery != "" {
-		return db.QueryContext(ctx, lastSelectQuery)
+	// Last result = last statement in the query; run only it to get its result (empty or not)
+	commands := sqlpkg.SplitCommands(query)
+	if len(commands) == 0 {
+		return nil, fmt.Errorf("query has no commands")
 	}
-
-	// Se não encontrou nenhum SELECT com linhas, retorna um result set vazio
-	// Executa a query novamente mas usando QueryContext que retornará o primeiro result set
-	// (que pode estar vazio, mas pelo menos retorna a estrutura correta)
-	return db.QueryContext(ctx, query)
+	lastCmd := commands[len(commands)-1]
+	return db.QueryContext(ctx, lastCmd)
 }
 
-// ExecuteMultipleStatements executa múltiplas declarações SQL usando Exec
-// e retorna apenas o número de linhas do último SELECT que retorna resultados.
-// Esta função processa todos os result sets mas retorna apenas o último que tem linhas,
-// que é o comportamento esperado quando usando Exec com múltiplas declarações.
-func ExecuteMultipleStatements(t *testing.T, db *sql.DB, ctx context.Context, query string) int {
-	rows, err := QueryContextLastResult(t, db, ctx, query)
-	if err != nil {
-		t.Fatalf("Failed to execute multiple statements: %v", err)
-	}
-	defer rows.Close()
-
-	rowCount := 0
-	for rows.Next() {
-		rowCount++
-	}
-
-	if err := rows.Err(); err != nil {
-		t.Fatalf("Error iterating rows: %v", err)
-	}
-
-	return rowCount
-}
+//// ExecuteMultipleStatements executa múltiplas declarações SQL usando Exec
+//// e retorna apenas o número de linhas do último SELECT que retorna resultados.
+//// Esta função processa todos os result sets mas retorna apenas o último que tem linhas,
+//// que é o comportamento esperado quando usando Exec com múltiplas declarações.
+//func ExecuteMultipleStatements(t *testing.T, db *sql.DB, ctx context.Context, query string) int {
+//	rows, err := QueryContextLastResult(t, db, ctx, query)
+//	if err != nil {
+//		t.Fatalf("Failed to execute multiple statements: %v", err)
+//	}
+//	defer rows.Close()
+//
+//	rowCount := 0
+//	for rows.Next() {
+//		rowCount++
+//	}
+//
+//	if err := rows.Err(); err != nil {
+//		t.Fatalf("Error iterating rows: %v", err)
+//	}
+//
+//	return rowCount
+//}

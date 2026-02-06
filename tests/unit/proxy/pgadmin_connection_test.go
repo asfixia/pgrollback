@@ -26,14 +26,7 @@ func TestPGAdminLikeConnection(t *testing.T) {
 
 	// Usa porta diferente para evitar conflitos com outros testes
 	testPort := cfg.Proxy.ListenPort
-	if testPort == 5433 {
-		testPort = 5440 // Porta diferente para este teste
-	}
 	testHost := cfg.Proxy.ListenHost
-	if testHost == "" {
-		testHost = "localhost"
-	}
-
 	// Verifica se a porta está disponível antes de iniciar o servidor
 	ensurePortIsAvailable(t, testHost, testPort)
 
@@ -71,16 +64,14 @@ func TestPGAdminLikeConnection(t *testing.T) {
 	db := connectToProxyServer(t, ctx, testHost, testPort, cfg.Postgres.Database, cfg.Postgres.User, cfg.Postgres.Password, testApplicationName, cfg.Test.PingTimeout.Duration)
 	defer db.Close()
 
-	pgAdminInitialQuery := `SET DateStyle=ISO; SET client_min_messages=notice; SELECT set_config('bytea_output','hex',false) FROM pg_show_all_settings() WHERE name = 'bytea_output'; SET client_encoding='utf-8'; SELECT 1 as um;`
 	queryTimeout := getOrDefault(cfg.Test.QueryTimeout.Duration, 5*time.Second)
 	t.Logf("Setting query timeout to: %v", queryTimeout)
 	queryCtx, queryCancel := context.WithTimeout(ctx, queryTimeout)
 	defer queryCancel()
 
-	// Log antes de executar a query
 	t.Logf("About to execute pgAdmin initial query with timeout: %v", queryTimeout)
 	startTime := time.Now()
-	rowCount := executePGAdminInitialQuery(t, db, queryCtx, pgAdminInitialQuery)
+	rowCount := executePGAdminInitialQuery(t, db, queryCtx)
 	if rowCount != 1 {
 		t.Fatalf("Expected 1 row, got %d", rowCount)
 	}
@@ -158,12 +149,11 @@ func isPostgreSQLAvailable(t *testing.T, host string, port int, database, user, 
 	return true
 }
 
-func executePGAdminInitialQuery(t *testing.T, db *sql.DB, ctx context.Context, query string) int {
-	// Log da query antes de executar para debug
-	t.Logf("Executing query: %s", query)
-
-	// Usa QueryContextLastResult que funciona como QueryContext
-	// mas retorna apenas o último result set ao invés do primeiro
+// executePGAdminInitialQuery runs the pgAdmin-style initial multi-statement query
+// (SET and SELECT commands) and returns the row count of the last result set only.
+// The query is defined here; it runs all commands and returns the last result (with rows if any).
+func executePGAdminInitialQuery(t *testing.T, db *sql.DB, ctx context.Context) int {
+	query := `SET DateStyle=ISO; SET client_min_messages=notice; SELECT set_config('bytea_output','hex',false) FROM pg_show_all_settings() WHERE name = 'bytea_output'; SET client_encoding='utf-8'; SELECT 1 as um;`
 	rows, err := QueryContextLastResult(t, db, ctx, query)
 	if err != nil {
 		t.Fatalf("Failed to execute pgAdmin initial query: %v", err)
@@ -179,11 +169,9 @@ func executePGAdminInitialQuery(t *testing.T, db *sql.DB, ctx context.Context, q
 		}
 		t.Logf("Query result row %d: %s", rowCount, result)
 	}
-
 	if err := rows.Err(); err != nil {
 		t.Fatalf("Error iterating rows: %v", err)
 	}
-
 	return rowCount
 }
 

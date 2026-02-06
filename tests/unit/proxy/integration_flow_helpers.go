@@ -24,11 +24,13 @@ func createTable(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession,
 // Usa a função unificada do pacote testutil.
 func createTableWithIdAndName(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, tableName string) {
 	t.Helper()
-	if session.DB != nil && session.DB.HasActiveTransaction() {
-		testutil.CreateTableWithIdAndName(t, session.DB.Tx(), tableName)
-	} else {
-		createTable(t, pgtest, session, tableName, "id SERIAL PRIMARY KEY, name VARCHAR(100)")
+	if session == nil || session.DB == nil {
+		t.Fatalf("Session or session.DB is nil")
 	}
+	if !session.DB.HasActiveTransaction() {
+		t.Fatalf("Session.DB has no active transaction - cannot create table")
+	}
+	testutil.CreateTableWithIdAndName(t, session.DB.Tx(), tableName)
 }
 
 // createTableWithIdAndData cria uma tabela com colunas (id SERIAL PRIMARY KEY, data VARCHAR(100)).
@@ -67,11 +69,13 @@ func insertRow(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, t
 // Usa a função unificada do pacote testutil quando possível.
 func insertRowWithName(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, tableName string, nameValue string) {
 	t.Helper()
-	if session.DB != nil && session.DB.HasActiveTransaction() {
-		testutil.InsertRowWithName(t, session.DB.Tx(), tableName, nameValue, "")
-	} else {
-		insertRow(t, pgtest, session, tableName, fmt.Sprintf("(name) VALUES ('%s')", nameValue))
+	if session == nil || session.DB == nil {
+		t.Fatalf("Session or session.DB is nil")
 	}
+	if !session.DB.HasActiveTransaction() {
+		t.Fatalf("Session.DB has no active transaction - cannot insert row with name")
+	}
+	testutil.InsertRowWithName(t, session.DB.Tx(), tableName, nameValue, "")
 }
 
 // insertRowWithData insere uma linha na tabela com coluna data.
@@ -89,22 +93,23 @@ func insertRowWithData(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSe
 // Usa a função unificada do pacote testutil.
 func assertTableCount(t *testing.T, session *proxy.TestSession, tableName string, expectedCount int, contextMsg string) {
 	t.Helper()
-	if session.DB != nil && session.DB.HasActiveTransaction() {
-		testutil.AssertTableCount(t, session.DB.Tx(), tableName, expectedCount, contextMsg)
-	} else {
+	if session.DB == nil || !session.DB.HasActiveTransaction() {
 		t.Fatalf("Session.DB has no active transaction - cannot assert table count")
 	}
+	testutil.AssertTableCount(t, session.DB.Tx(), tableName, expectedCount, contextMsg)
 }
 
 // assertRowCountWithCondition verifica que a contagem de linhas com uma condição WHERE corresponde ao valor esperado.
 // Usa a função unificada do pacote testutil.
 func assertRowCountWithCondition(t *testing.T, session *proxy.TestSession, tableName string, whereClause string, expectedCount int, contextMsg string) {
 	t.Helper()
-	if session.DB != nil && session.DB.HasActiveTransaction() {
-		testutil.AssertRowCountWithCondition(t, session.DB.Tx(), tableName, whereClause, expectedCount, contextMsg)
-	} else {
+	if session == nil || session.DB == nil {
+		t.Fatalf("Session or session.DB is nil")
+	}
+	if !session.DB.HasActiveTransaction() {
 		t.Fatalf("Session.DB has no active transaction - cannot assert row count")
 	}
+	testutil.AssertRowCountWithCondition(t, session.DB.Tx(), tableName, whereClause, expectedCount, contextMsg)
 }
 
 // assertTableExists verifica que a tabela existe usando information_schema.
@@ -140,8 +145,8 @@ func execBeginAndVerify(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestS
 		}
 		t.Fatalf("%s: %v", msg, err)
 	}
-	if session.GetSavepointLevel() != expectedLevel {
-		msg := fmt.Sprintf("SavepointLevel after BEGIN = %v, want %d", session.GetSavepointLevel(), expectedLevel)
+	if session.DB.GetSavepointLevel() != expectedLevel {
+		msg := fmt.Sprintf("SavepointLevel after BEGIN = %v, want %d", session.DB.GetSavepointLevel(), expectedLevel)
 		if contextMsg != "" {
 			msg = fmt.Sprintf("%s (%s)", msg, contextMsg)
 		}
@@ -149,8 +154,8 @@ func execBeginAndVerify(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestS
 	}
 }
 
-// execCommitAndVerify executa COMMIT através do interceptor e verifica o nível de savepoint.
-func execCommitAndVerify(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, expectedLevel int, contextMsg string) {
+// execCommitOnLevel executa COMMIT através do interceptor e verifica o nível de savepoint.
+func execCommitOnLevel(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, expectedLevel int, contextMsg string) {
 	t.Helper()
 	query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "COMMIT")
 	if err != nil {
@@ -171,8 +176,8 @@ func execCommitAndVerify(t *testing.T, pgtest *proxy.PGTest, session *proxy.Test
 		}
 		t.Fatalf("%s: %v", msg, err)
 	}
-	if session.GetSavepointLevel() != expectedLevel {
-		msg := fmt.Sprintf("SavepointLevel after COMMIT = %v, want %d", session.GetSavepointLevel(), expectedLevel)
+	if session.DB.GetSavepointLevel() != expectedLevel {
+		msg := fmt.Sprintf("SavepointLevel after COMMIT = %v, want %d", session.DB.GetSavepointLevel(), expectedLevel)
 		if contextMsg != "" {
 			msg = fmt.Sprintf("%s (%s)", msg, contextMsg)
 		}
@@ -202,8 +207,8 @@ func execRollbackAndVerify(t *testing.T, pgtest *proxy.PGTest, session *proxy.Te
 		}
 		t.Fatalf("%s: %v", msg, err)
 	}
-	if session.GetSavepointLevel() != expectedLevel {
-		msg := fmt.Sprintf("SavepointLevel after ROLLBACK = %v, want %d", session.GetSavepointLevel(), expectedLevel)
+	if session.DB.GetSavepointLevel() != expectedLevel {
+		msg := fmt.Sprintf("SavepointLevel after ROLLBACK = %v, want %d", session.DB.GetSavepointLevel(), expectedLevel)
 		if contextMsg != "" {
 			msg = fmt.Sprintf("%s (%s)", msg, contextMsg)
 		}
@@ -211,7 +216,7 @@ func execRollbackAndVerify(t *testing.T, pgtest *proxy.PGTest, session *proxy.Te
 	}
 }
 
-// assertCommitBlocked verifica que COMMIT está bloqueado (retorna "SELECT 1").
+// assertCommitBlocked verifica que COMMIT está bloqueado
 func assertCommitBlocked(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, contextMsg string) {
 	t.Helper()
 	query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "COMMIT")
@@ -222,8 +227,8 @@ func assertCommitBlocked(t *testing.T, pgtest *proxy.PGTest, session *proxy.Test
 		}
 		t.Fatalf("%s = %v", msg, err)
 	}
-	if query != "SELECT 1" {
-		msg := fmt.Sprintf("InterceptQuery(COMMIT at level 0) = %v, want SELECT 1 (blocked)", query)
+	if query != proxy.DEFAULT_SELECT_ONE {
+		msg := fmt.Sprintf("InterceptQuery(COMMIT at level 0) = %v, want %s (blocked)", query, proxy.DEFAULT_SELECT_ONE)
 		if contextMsg != "" {
 			msg = fmt.Sprintf("%s (%s)", msg, contextMsg)
 		}
@@ -231,7 +236,7 @@ func assertCommitBlocked(t *testing.T, pgtest *proxy.PGTest, session *proxy.Test
 	}
 }
 
-// assertRollbackBlocked verifica que ROLLBACK está bloqueado (retorna "SELECT 1").
+// assertRollbackBlocked verifica que ROLLBACK está bloqueado
 func assertRollbackBlocked(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, contextMsg string) {
 	t.Helper()
 	query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "ROLLBACK")
@@ -242,8 +247,8 @@ func assertRollbackBlocked(t *testing.T, pgtest *proxy.PGTest, session *proxy.Te
 		}
 		t.Fatalf("%s = %v", msg, err)
 	}
-	if query != "SELECT 1" {
-		msg := fmt.Sprintf("InterceptQuery(ROLLBACK at level 0) = %v, want SELECT 1 (blocked)", query)
+	if query != proxy.DEFAULT_SELECT_ONE {
+		msg := fmt.Sprintf("InterceptQuery(ROLLBACK at level 0) = %v, want %s (blocked)", query, proxy.DEFAULT_SELECT_ONE)
 		if contextMsg != "" {
 			msg = fmt.Sprintf("%s (%s)", msg, contextMsg)
 		}

@@ -189,6 +189,22 @@ func connectToPGTestProxy(t *testing.T, testID string) *sql.DB {
 	return pgtestDB
 }
 
+// connectToPGTestProxySingleConn is like connectToPGTestProxy but forces a single connection
+// (MaxOpenConns(1)). Used by repro tests to rule out pool reordering.
+func connectToPGTestProxySingleConn(t *testing.T, testID string) *sql.DB {
+	t.Helper()
+	pgtestProxyDSN := getPGTestProxyDSN(testID)
+	pgtestDB, err := sql.Open("pgx", pgtestProxyDSN)
+	if err != nil {
+		t.Fatalf("Failed to connect to PGTest proxy: %v", err)
+	}
+	pingConnection(t, pgtestDB)
+	pgtestDB.SetMaxOpenConns(1)
+	pgtestDB.SetMaxIdleConns(1)
+	pgtestDB.SetConnMaxLifetime(0)
+	return pgtestDB
+}
+
 // pingWithTimeout executa um ping na conexão com timeout separado.
 // Se contextMessage for fornecido e o ping falhar, faz t.Fatalf com a mensagem.
 // Se retryOnFailure for true, tenta uma query SELECT 1 antes de falhar.
@@ -215,6 +231,8 @@ func pingWithTimeout(t *testing.T, db *sql.DB, timeout time.Duration, retryOnFai
 		}
 		if len(contextMessage) > 0 && contextMessage[0] != "" {
 			t.Fatalf("%s: %v", contextMessage[0], err)
+		} else {
+			t.Fatalf("Connection ping failed: %v", err)
 		}
 		return false
 	}
@@ -232,7 +250,10 @@ func assertTableExistence(t *testing.T, db *sql.DB, tableName string, shouldExis
 	if shouldExist {
 		expectedQuantity = 1
 	}
-	assertQueryCount(t, db, fmt.Sprintf("SELECT COUNT(*) FROM to_regclass('%s') as answer where answer is not null", tableName), expectedQuantity, "Error: Table existence assertion failed: "+successMessage)
+	// Scalar query with no FROM: always returns exactly one row (0 or 1). Avoids "sql: no rows in result set"
+	// when the proxy returns empty result for COUNT(*) FROM to_regclass(...) WHERE ... when table does not exist.
+	query := fmt.Sprintf("SELECT CASE WHEN to_regclass('%s') IS NOT NULL THEN 1 ELSE 0 END", tableName)
+	assertQueryCount(t, db, query, expectedQuantity, "Error: Table existence assertion failed: "+successMessage)
 }
 
 // assertTableExists verifica que uma tabela existe (sem contar linhas).
@@ -251,14 +272,23 @@ func assertTableDoesNotExist(t *testing.T, db *sql.DB, tableName string, success
 
 // assertCount verifica que uma query SQL retorna um count específico.
 // Usa t.Fatalf se o count não corresponder ao esperado ou se houver erro na query.
-// Esta função assume que a tabela existe - não trata "does not exist" como sucesso.
+// Usa Query em vez de QueryRow para que, quando o proxy retorna 0 linhas (ex.: tabela inexistente),
+// tratemos como count 0 em vez de "sql: no rows in result set".
 func assertCount(t *testing.T, db *sql.DB, query string, expectedCount int, successMessage string) {
 	t.Helper()
-	var count int
-	err := db.QueryRow(query).Scan(&count)
+	rows, err := db.Query(query)
 	if err != nil {
 		t.Fatalf("Failed to execute query: %v\nQuery: %s", err, query)
 	}
+	defer rows.Close()
+
+	count := -1 //-1 means "not found"
+	if rows.Next() {
+		if err := rows.Scan(&count); err != nil {
+			t.Fatalf("Failed to scan count: %v\nQuery: %s", err, query)
+		}
+	}
+	// 0 rows from proxy -> count stays 0; 1 row -> count from result
 
 	if count != expectedCount {
 		t.Fatalf("Query count = %d, expected %d\nQuery: %s", count, expectedCount, query)
@@ -387,6 +417,17 @@ func execRollbackOrFail(t *testing.T, db *sql.DB) {
 	}
 }
 
+// execExpectError executa a SQL e falha o teste se não retornar erro.
+// Use quando se espera que o comando falhe (e.g. transação abortada).
+func execExpectError(t *testing.T, db *sql.DB, sql string, contextMessage string) {
+	t.Helper()
+	_, err := db.Exec(sql)
+	if err == nil {
+		t.Fatalf("%s: expected SQL to fail, got nil. SQL: %s", contextMessage, sql)
+	}
+	t.Logf("SUCCESS: %s: SQL correctly failed: %v", contextMessage, err)
+}
+
 // execPgtestRollback envia "pgtest rollback" e loga em caso de erro (não falha o teste).
 // Use para limpeza no fim do teste ou quando o sucesso do rollback não é assertado.
 func execPgtestRollback(t *testing.T, db *sql.DB) {
@@ -445,6 +486,17 @@ func execReleaseSavepoint(t *testing.T, db *sql.DB, savepointName string) {
 	}
 }
 
+// execReleaseSavepointExpectError executa RELEASE SAVEPOINT e espera que dê erro (e.g. savepoint já liberado).
+// Falha o teste se a execução não retornar erro.
+func execReleaseSavepointExpectError(t *testing.T, db *sql.DB, savepointName string) {
+	t.Helper()
+	_, err := db.Exec(fmt.Sprintf("RELEASE SAVEPOINT %s", savepointName))
+	if err == nil {
+		t.Fatalf("RELEASE SAVEPOINT %s should have failed (savepoint does not exist), got nil", savepointName)
+	}
+	t.Logf("SUCCESS: RELEASE SAVEPOINT %s correctly failed: %v", savepointName, err)
+}
+
 // execRollbackToSavepoint executa ROLLBACK TO SAVEPOINT e verifica que RowsAffected == 0.
 // Falha o teste se houver erro ou se RowsAffected != 0.
 func execRollbackToSavepoint(t *testing.T, db *sql.DB, savepointName string) {
@@ -457,6 +509,15 @@ func execRollbackToSavepoint(t *testing.T, db *sql.DB, savepointName string) {
 	if n != 0 {
 		t.Fatalf("ROLLBACK TO SAVEPOINT should report 0 rows affected, got: %d", n)
 	}
+}
+
+func execRollbackToInvalidSavepoint(t *testing.T, db *sql.DB, savepointName string) {
+	t.Helper()
+	_, err := db.Exec(fmt.Sprintf("ROLLBACK TO SAVEPOINT %s", savepointName))
+	if err == nil {
+		t.Fatalf("Expected error for invalid savepoint: %v", err)
+	}
+	t.Logf("SUCCESS: Invalid savepoint error correctly detected: %v", err)
 }
 
 // dropTable executa DROP TABLE. Por padrão espera sucesso (err == nil); falha o teste se der erro.

@@ -14,38 +14,20 @@ func TestTransactionFlow_CompleteCycle(t *testing.T) {
 	testID := "test_transaction_flow"
 	session, err := pgtest.GetOrCreateSession(testID)
 	if err != nil {
-		t.Skip("Skipping test - requires PostgreSQL connection")
+		t.Fatalf("GetOrCreateSession() error = %v", err)
 	}
 
 	tableName := "test_transaction_table_" + testID
-
-	// 1. Criar tabela
 	createTableWithIdAndName(t, pgtest, session, tableName)
 	assertTableCount(t, session, tableName, 0, "Table should be empty initially")
-
-	// 2. Primeiro "commit" (deve ser bloqueado porque level = 0)
-	assertCommitBlocked(t, pgtest, session, "COMMIT at level 0 should be blocked")
-
-	// Simula BEGIN para criar savepoint (simula commit que vira savepoint)
-	execBeginAndVerify(t, pgtest, session, 1, "First BEGIN creates savepoint level 1")
-
-	// 3. Inserir linha na tabela
-	insertRowWithName(t, pgtest, session, tableName, "test_row")
+	assertCommitBlocked(t, pgtest, session, "COMMIT at level 0 should be blocked")     //fake commit
+	execBeginAndVerify(t, pgtest, session, 1, "First BEGIN creates savepoint level 1") //1 Begin
+	insertRowWithName(t, pgtest, session, tableName, "test_row")                       //insert row 1 in table
 	assertRowCountWithCondition(t, session, tableName, "name = 'test_row'", 1, "Row should be inserted")
-
-	// 4. Cria outro savepoint ANTES de fazer commit (agora será sp_2)
-	// Isso permite fazer rollback depois
-	execBeginAndVerify(t, pgtest, session, 2, "Second BEGIN creates savepoint level 2")
-
-	// 5. Segundo "commit" (deve virar savepoint) - libera sp_2
-	execCommitAndVerify(t, pgtest, session, 1, "COMMIT releases savepoint level 2")
-
-	// Verificar que a linha ainda existe (após release do savepoint sp_2)
+	execBeginAndVerify(t, pgtest, session, 2, "Second BEGIN creates savepoint level 2") //2 Begin
+	execCommitOnLevel(t, pgtest, session, 1, "COMMIT releases savepoint level 2")       //commit to level 1
 	assertRowCountWithCondition(t, session, tableName, "name = 'test_row'", 1, "Row should still exist after COMMIT")
-
-	// 6. Primeiro rollback (deve remover a linha) - rollback para sp_1
-	execRollbackAndVerify(t, pgtest, session, 0, "ROLLBACK to savepoint level 1")
-
+	execRollbackAndVerify(t, pgtest, session, 0, "ROLLBACK to savepoint level 1") //rollback to level 0
 	// Verifica que a linha foi removida (rollback removeu a inserção que estava dentro de sp_1)
 	assertRowCountWithCondition(t, session, tableName, "name = 'test_row'", 0, "Row should be removed after ROLLBACK")
 

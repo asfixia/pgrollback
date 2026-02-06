@@ -161,7 +161,7 @@ func AssertTableCount(t *testing.T, executor DBExecutor, tableName string, expec
 	checkQuery := fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName)
 	ctx := context.Background()
 	row := queryRow(ctx, executor, checkQuery)
-	var count int
+	count := -1
 	err := scanRow(row, &count)
 	if err != nil {
 		msg := fmt.Sprintf("Failed to check table count for %s", tableName)
@@ -175,7 +175,7 @@ func AssertTableCount(t *testing.T, executor DBExecutor, tableName string, expec
 		if contextMsg != "" {
 			msg = fmt.Sprintf("%s (%s)", msg, contextMsg)
 		}
-		t.Errorf("%s", msg)
+		t.Fatalf("%s", msg)
 	}
 }
 

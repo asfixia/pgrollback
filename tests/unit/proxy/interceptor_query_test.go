@@ -34,14 +34,18 @@ func TestHandleBegin(t *testing.T) {
 		t.Fatalf("InterceptQuery(BEGIN) error = %v", err)
 	}
 
-	assertSavepointQuery(t, query, 1)
-
-	if session.GetSavepointLevel() != 1 {
-		t.Errorf("SavepointLevel = %v, want 1", session.GetSavepointLevel())
+	if session.DB == nil {
+		t.Fatalf("Error Session has no DB connection on ID: %s", pgtest.GetTestID(session))
 	}
 
-	if len(session.GetSavepoints()) != 1 {
-		t.Errorf("Savepoints length = %v, want 1", len(session.GetSavepoints()))
+	assertSavepointQuery(t, query, 1)
+
+	if session.DB.GetSavepointLevel() != 1 {
+		t.Errorf("SavepointLevel = %v, want 1", session.DB.GetSavepointLevel())
+	}
+
+	if session.DB.SavepointLevel != 1 {
+		t.Errorf("Savepoints length = %v, want 1", session.DB.SavepointLevel)
 	}
 
 	query2, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "BEGIN")
@@ -51,8 +55,8 @@ func TestHandleBegin(t *testing.T) {
 
 	assertSavepointQuery(t, query2, 2)
 
-	if session.GetSavepointLevel() != 2 {
-		t.Errorf("SavepointLevel = %v, want 2", session.GetSavepointLevel())
+	if session.DB.GetSavepointLevel() != 2 {
+		t.Errorf("SavepointLevel = %v, want 2", session.DB.GetSavepointLevel())
 	}
 }
 
@@ -72,12 +76,12 @@ func TestHandleCommit(t *testing.T) {
 
 		assertReleaseSavepointQuery(t, query, 2)
 
-		if session.GetSavepointLevel() != 1 {
-			t.Errorf("SavepointLevel = %v, want 1", session.GetSavepointLevel())
+		if session.DB.GetSavepointLevel() != 1 {
+			t.Errorf("SavepointLevel = %v, want 1", session.DB.GetSavepointLevel())
 		}
 
-		if len(session.GetSavepoints()) != 1 {
-			t.Errorf("Savepoints length = %v, want 1", len(session.GetSavepoints()))
+		if session.DB.SavepointLevel != 1 {
+			t.Errorf("Savepoints length = %v, want 1", session.DB.SavepointLevel)
 		}
 	})
 
@@ -92,12 +96,12 @@ func TestHandleCommit(t *testing.T) {
 			t.Fatalf("InterceptQuery(COMMIT) error = %v", err)
 		}
 
-		if query != "SELECT 1" {
-			t.Errorf("InterceptQuery(COMMIT) = %v, want SELECT 1 (blocked)", query)
+		if query != DEFAULT_SELECT_ONE {
+			t.Errorf("InterceptQuery(COMMIT) = %v, want %s (blocked)", query, DEFAULT_SELECT_ONE)
 		}
 
-		if session.GetSavepointLevel() != 0 {
-			t.Errorf("SavepointLevel = %v, want 0", session.GetSavepointLevel())
+		if session.DB.GetSavepointLevel() != 0 {
+			t.Errorf("SavepointLevel = %v, want 0", session.DB.GetSavepointLevel())
 		}
 	})
 }
@@ -123,12 +127,12 @@ func TestHandleRollback(t *testing.T) {
 			t.Errorf("Query should contain level 2, got: %s", query)
 		}
 
-		if session.GetSavepointLevel() != 1 {
-			t.Errorf("SavepointLevel = %v, want 1", session.GetSavepointLevel())
+		if session.DB.GetSavepointLevel() != 1 {
+			t.Errorf("SavepointLevel = %v, want 1", session.DB.GetSavepointLevel())
 		}
 
-		if len(session.GetSavepoints()) != 1 {
-			t.Errorf("Savepoints length = %v, want 1", len(session.GetSavepoints()))
+		if session.DB.SavepointLevel != 1 {
+			t.Errorf("Savepoints length = %v, want 1", session.DB.SavepointLevel)
 		}
 	})
 
@@ -143,12 +147,12 @@ func TestHandleRollback(t *testing.T) {
 			t.Fatalf("InterceptQuery(ROLLBACK) error = %v", err)
 		}
 
-		if query != "SELECT 1" {
-			t.Errorf("InterceptQuery(ROLLBACK) = %v, want SELECT 1 (blocked)", query)
+		if query != DEFAULT_SELECT_ONE {
+			t.Errorf("InterceptQuery(ROLLBACK) = %v, want %s (blocked)", query, DEFAULT_SELECT_ONE)
 		}
 
-		if session.GetSavepointLevel() != 0 {
-			t.Errorf("SavepointLevel = %v, want 0", session.GetSavepointLevel())
+		if session.DB.GetSavepointLevel() != 0 {
+			t.Errorf("SavepointLevel = %v, want 0", session.DB.GetSavepointLevel())
 		}
 	})
 }
@@ -174,10 +178,7 @@ func TestHandlePGTestCommandUnit(t *testing.T) {
 
 	t.Run("begin_missing_test_id", func(t *testing.T) {
 		// Cria sessão sem TestID para testar o caso de erro
-		session := &proxy.TestSession{
-			SavepointLevel: 0,
-			Savepoints:     []string{},
-		}
+		session := &proxy.TestSession{}
 		_, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "pgtest begin")
 		if err == nil {
 			t.Error("InterceptQuery(pgtest begin) should return error for missing test_id")
@@ -186,10 +187,7 @@ func TestHandlePGTestCommandUnit(t *testing.T) {
 
 	t.Run("rollback_missing_test_id", func(t *testing.T) {
 		// Cria sessão sem TestID para testar o caso de erro
-		session := &proxy.TestSession{
-			SavepointLevel: 0,
-			Savepoints:     []string{},
-		}
+		session := &proxy.TestSession{}
 		_, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "pgtest rollback")
 		if err == nil {
 			t.Error("InterceptQuery(pgtest rollback) should return error for missing test_id")
@@ -198,10 +196,7 @@ func TestHandlePGTestCommandUnit(t *testing.T) {
 
 	t.Run("status_missing_test_id", func(t *testing.T) {
 		// Cria sessão sem TestID para testar o caso de erro
-		session := &proxy.TestSession{
-			SavepointLevel: 0,
-			Savepoints:     []string{},
-		}
+		session := &proxy.TestSession{}
 		_, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "pgtest status")
 		if err == nil {
 			t.Error("InterceptQuery(pgtest status) should return error for missing test_id")
@@ -220,8 +215,8 @@ func TestHandlePGTestCommandUnit(t *testing.T) {
 		if err != nil {
 			t.Fatalf("InterceptQuery(pgtest begin) error = %v", err)
 		}
-		if query != "SELECT 1" {
-			t.Errorf("InterceptQuery(pgtest begin) = %v, want SELECT 1", query)
+		if query != DEFAULT_SELECT_ONE {
+			t.Errorf("InterceptQuery(pgtest begin) = %v, want %s", query, DEFAULT_SELECT_ONE)
 		}
 		// Verifica que a sessão foi criada/reutilizada
 		createdSession := pgtest.GetSession(testID)
@@ -242,8 +237,8 @@ func TestHandlePGTestCommandUnit(t *testing.T) {
 		if err != nil {
 			t.Fatalf("InterceptQuery(pgtest rollback) error = %v", err)
 		}
-		if query != "SELECT 1" {
-			t.Errorf("InterceptQuery(pgtest rollback) = %v, want SELECT 1", query)
+		if query != FULLROLLBACK_SENTINEL {
+			t.Errorf("InterceptQuery(pgtest rollback) = %v, want %s", query, FULLROLLBACK_SENTINEL)
 		}
 		// Verifica que a sessão ainda existe (rollback não remove a sessão, apenas reconecta)
 		// A sessão é mantida, apenas a conexão é recriada
@@ -363,6 +358,89 @@ func TestInterceptQuery_NormalQueries(t *testing.T) {
 	})
 }
 
+// TestInterceptQuery_Routing is a table-driven test for InterceptQuery dispatch and ROLLBACK vs ROLLBACK TO SAVEPOINT.
+// It documents when a query is passed through unchanged vs intercepted, and helps find routing bugs.
+func TestInterceptQuery_Routing(t *testing.T) {
+	pgtest := newPGTestFromConfig()
+
+	tests := []struct {
+		name             string
+		query            string
+		needSession      bool
+		savepointLevel   int // used only if needSession
+		expectPassThrough bool // true: output must equal query, err nil
+		expectErr        bool
+		outputMustContain string // if set and not pass-through, output must contain this (e.g. "SAVEPOINT", "RELEASE")
+	}{
+		// ---- Pass-through: no session, query returned unchanged ----
+		{name: "select_passes_through", query: "SELECT 1", needSession: false, expectPassThrough: true},
+		{name: "insert_passes_through", query: "INSERT INTO t VALUES (1)", needSession: false, expectPassThrough: true},
+		{name: "rollback_to_savepoint_passes_through", query: "ROLLBACK TO SAVEPOINT sp1", needSession: false, expectPassThrough: true},
+		{name: "rollback_to_savepoint_lowercase_passes_through", query: "rollback to savepoint sp1", needSession: false, expectPassThrough: true},
+		{name: "rollback_to_savepoint_no_name_passes_through", query: "ROLLBACK TO SAVEPOINT", needSession: false, expectPassThrough: true},
+		{name: "rollback_to_savepoint_whitespace_passes_through", query: "  ROLLBACK TO SAVEPOINT pgtest_v_1  ", needSession: false, expectPassThrough: true},
+		{name: "select_rollback_in_string_passes_through", query: "SELECT 'ROLLBACK' FROM t", needSession: false, expectPassThrough: true},
+		{name: "empty_string_passes_through", query: "", needSession: false, expectPassThrough: true},
+		{name: "whitespace_only_passes_through", query: "   \t\n  ", needSession: false, expectPassThrough: true},
+		// ---- Intercepted: need session ----
+		{name: "plain_rollback_intercepted", query: "ROLLBACK", needSession: true, savepointLevel: 1, expectPassThrough: false, outputMustContain: "ROLLBACK TO SAVEPOINT"},
+		{name: "rollback_with_semicolon_intercepted", query: "ROLLBACK;", needSession: true, savepointLevel: 1, expectPassThrough: false, outputMustContain: "SAVEPOINT"},
+		{name: "rollback_whitespace_intercepted", query: "  ROLLBACK  ", needSession: true, savepointLevel: 1, expectPassThrough: false, outputMustContain: "SAVEPOINT"},
+		{name: "begin_intercepted", query: "BEGIN", needSession: true, savepointLevel: 0, expectPassThrough: false, outputMustContain: "SAVEPOINT"},
+		{name: "begin_transaction_intercepted_as_begin", query: "BEGIN TRANSACTION", needSession: true, savepointLevel: 0, expectPassThrough: false, outputMustContain: "SAVEPOINT"},
+		{name: "commit_intercepted", query: "COMMIT", needSession: true, savepointLevel: 1, expectPassThrough: false, outputMustContain: "RELEASE SAVEPOINT"},
+		{name: "commit_work_intercepted_as_commit", query: "COMMIT WORK", needSession: true, savepointLevel: 1, expectPassThrough: false, outputMustContain: "RELEASE"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var testID string
+			if tt.needSession {
+				// Use unique testID per case so session state is isolated (no cross-test pollution)
+				uniqueID := "routing_" + strings.ReplaceAll(tt.name, " ", "_")
+				s := newTestSessionWithLevel(pgtest, uniqueID, tt.savepointLevel)
+				if s == nil {
+					t.Fatal("failed to create session for test")
+				}
+				testID = pgtest.GetTestID(s)
+				if testID == "" {
+					t.Fatal("GetTestID returned empty")
+				}
+			} else {
+				testID = "no_session_needed"
+			}
+
+			got, err := pgtest.InterceptQuery(testID, tt.query)
+
+			if tt.expectErr {
+				if err == nil {
+					t.Errorf("InterceptQuery() err = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("InterceptQuery() err = %v", err)
+				return
+			}
+
+			if tt.expectPassThrough {
+				if got != tt.query {
+					t.Errorf("InterceptQuery() = %q, want pass-through %q", got, tt.query)
+				}
+				return
+			}
+
+			// Intercepted: output should differ from input and optionally contain expected substring
+			if got == tt.query {
+				t.Errorf("InterceptQuery() passed through %q unchanged, expected interception", tt.query)
+			}
+			if tt.outputMustContain != "" && !strings.Contains(got, tt.outputMustContain) {
+				t.Errorf("InterceptQuery() = %q, want output containing %q", got, tt.outputMustContain)
+			}
+		})
+	}
+}
+
 func TestInterceptQuery_MultipleSavepoints(t *testing.T) {
 	pgtest := newPGTestFromConfig()
 	session := newTestSession(pgtest)
@@ -374,11 +452,11 @@ func TestInterceptQuery_MultipleSavepoints(t *testing.T) {
 			t.Fatalf("InterceptQuery(BEGIN #%d) error = %v", i, err)
 		}
 		assertSavepointQuery(t, query, i)
-		if session.GetSavepointLevel() != i {
-			t.Errorf("SavepointLevel after BEGIN #%d = %v, want %v", i, session.GetSavepointLevel(), i)
+		if session.DB.GetSavepointLevel() != i {
+			t.Errorf("SavepointLevel after BEGIN #%d = %v, want %v", i, session.DB.GetSavepointLevel(), i)
 		}
-		if len(session.GetSavepoints()) != i {
-			t.Errorf("Savepoints length after BEGIN #%d = %v, want %v", i, len(session.GetSavepoints()), i)
+		if session.DB.SavepointLevel != i {
+			t.Errorf("Savepoints length after BEGIN #%d = %v, want %v", i, session.DB.SavepointLevel, i)
 		}
 	}
 
@@ -389,17 +467,17 @@ func TestInterceptQuery_MultipleSavepoints(t *testing.T) {
 			t.Fatalf("InterceptQuery(COMMIT at level %d) error = %v", i, err)
 		}
 		assertReleaseSavepointQuery(t, query, i)
-		if session.GetSavepointLevel() != i-1 {
-			t.Errorf("SavepointLevel after COMMIT = %v, want %v", session.GetSavepointLevel(), i-1)
+		if session.DB.GetSavepointLevel() != i-1 {
+			t.Errorf("SavepointLevel after COMMIT = %v, want %v", session.DB.GetSavepointLevel(), i-1)
 		}
 	}
 
 	// Verifica estado final
-	if session.GetSavepointLevel() != 2 {
-		t.Errorf("Final SavepointLevel = %v, want 2", session.GetSavepointLevel())
+	if session.DB.GetSavepointLevel() != 2 {
+		t.Errorf("Final SavepointLevel = %v, want 2", session.DB.GetSavepointLevel())
 	}
-	if len(session.GetSavepoints()) != 2 {
-		t.Errorf("Final Savepoints length = %v, want 2", len(session.GetSavepoints()))
+	if session.DB.SavepointLevel != 2 {
+		t.Errorf("Final Savepoints length = %v, want 2", session.DB.SavepointLevel)
 	}
 }
 
