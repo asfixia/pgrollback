@@ -98,7 +98,7 @@ func TestMain(m *testing.M) {
 func TestProtectionAgainstAccidentalCommit(t *testing.T) {
 	testID := "test_commit_protection"
 	pgtestDB := connectToPGTestProxy(t, testID)
-	//defer pgtestDB.Close()
+	defer pgtestDB.Close()
 	execBegin(t, pgtestDB, "First BEGIN: pgtest converts to SAVEPOINT (creates base transaction if needed)")
 	schema := getTestSchema()
 	tableName := postgres.QuoteQualifiedName(schema, "pgtest_commit_protection")
@@ -120,7 +120,7 @@ func TestProtectionAgainstAccidentalCommit(t *testing.T) {
 	assertTableRowCount(t, pgtestDB, tableName, 2, "Table has 2 rows after INSERT in second transaction")
 	pingWithTimeout(t, pgtestDB, 5*time.Second, true, "Connection check after INSERT in second transaction")
 	postgresDBDirect := connectToRealPostgres(t)
-	//defer postgresDBDirect.Close()
+	defer postgresDBDirect.Close()
 	pingWithTimeout(t, postgresDBDirect, 5*time.Second, false)
 	assertTableDoesNotExist(t, postgresDBDirect, tableName, "Table does not exist in real PostgreSQL - data only exists in pgtest transaction (not committed)")
 	execRollback(t, pgtestDB)
@@ -343,155 +343,152 @@ func TestResetSessionPingBeforeQuery(t *testing.T) {
 	t.Logf("SUCCESS: got one row with value %d after full rollback", val)
 }
 
-func TestTransactionHandling(t *testing.T) {
-	testID := "test_transaction_handling"
+func transactionHandlingTableName() string {
+	return postgres.QuoteQualifiedName(getTestSchema(), "pgtest_transaction_test")
+}
+
+func TestTransactionHandling_InsertRowAndRollback(t *testing.T) {
+	testID := "test_txn_insert_rollback"
 	pgtestDB := connectToPGTestProxy(t, testID)
 	defer pgtestDB.Close()
-
-	schema := getTestSchema()
-	tableName := postgres.QuoteQualifiedName(schema, "pgtest_transaction_test")
+	tableName := transactionHandlingTableName()
 
 	assertTableDoesNotExist(t, pgtestDB, tableName, "Table should not exist before test")
-
-	// 1. Teste básico: BEGIN/COMMIT
-	t.Run("insert_row_and_rollback", func(t *testing.T) {
-		createTableWithValueColumn(t, pgtestDB, tableName)
-		// BEGIN é convertido em SAVEPOINT pelo pgtest
-		execBegin(t, pgtestDB, "")
-		insertOneRow(t, pgtestDB, tableName, "alice", "insert row in basic BEGIN/COMMIT test")
-		assertTableRowCount(t, pgtestDB, tableName, 1, "Basic BEGIN/COMMIT works correctly")
-		execRollbackOrFail(t, pgtestDB)
-		assertTableRowCount(t, pgtestDB, tableName, 0, "Basic BEGIN/COMMIT works correctly")
-		execPgTestFullRollback(t, pgtestDB)
-		pingWithTimeout(t, pgtestDB, 5*time.Second, false, "Table should not exist after pgtest rollback")
-		assertTableDoesNotExist(t, pgtestDB, tableName, "Table should not exist after pgtest rollback")
-		t.Log("SUCCESS: insert_row_and_rollback correctly")
-	})
+	createTableWithValueColumn(t, pgtestDB, tableName)
+	execBegin(t, pgtestDB, "")
+	insertOneRow(t, pgtestDB, tableName, "alice", "insert row in basic BEGIN/COMMIT test")
+	assertTableRowCount(t, pgtestDB, tableName, 1, "Basic BEGIN/COMMIT works correctly")
+	execRollbackOrFail(t, pgtestDB)
+	assertTableRowCount(t, pgtestDB, tableName, 0, "Basic BEGIN/COMMIT works correctly")
 	execPgTestFullRollback(t, pgtestDB)
+	pingWithTimeout(t, pgtestDB, 5*time.Second, false, "Table should not exist after pgtest rollback")
+	assertTableDoesNotExist(t, pgtestDB, tableName, "Table should not exist after pgtest rollback")
+	t.Log("SUCCESS: insert_row_and_rollback correctly")
+}
 
-	// 3. Teste Savepoints explícitos
-	t.Run("explicit_savepoint", func(t *testing.T) {
-		createTableWithValueColumn(t, pgtestDB, tableName)
-		execBegin(t, pgtestDB, "")
-		insertOneRow(t, pgtestDB, tableName, "charlie", "insert row before explicit savepoint test")
-		assertTableRowCount(t, pgtestDB, tableName, 1, "Rollback must return the row quantity to 1")
-		execSavepoint(t, pgtestDB, "pgtsp1")
-		assertTableRowCount(t, pgtestDB, tableName, 1, "Rollback must return the row quantity to 1")
-		insertOneRow(t, pgtestDB, tableName, "david", "insert row after explicit savepoint to test rollback to savepoint")
-		assertTableRowCount(t, pgtestDB, tableName, 2, "Inserted row works correctly")
-		execRollbackToSavepoint(t, pgtestDB, "pgtsp1")
-		assertTableRowCount(t, pgtestDB, tableName, 1, "Rollback must return the row quantity to 1")
-		execPgTestFullRollback(t, pgtestDB)
-		t.Log("SUCCESS: Explicit savepoint works correctly")
-	})
+func TestTransactionHandling_ExplicitSavepoint(t *testing.T) {
+	testID := "test_txn_explicit_savepoint"
+	pgtestDB := connectToPGTestProxy(t, testID)
+	defer pgtestDB.Close()
+	tableName := transactionHandlingTableName()
+
+	createTableWithValueColumn(t, pgtestDB, tableName)
+	execBegin(t, pgtestDB, "")
+	insertOneRow(t, pgtestDB, tableName, "charlie", "insert row before explicit savepoint test")
+	assertTableRowCount(t, pgtestDB, tableName, 1, "Rollback must return the row quantity to 1")
+	execSavepoint(t, pgtestDB, "pgtsp1")
+	assertTableRowCount(t, pgtestDB, tableName, 1, "Rollback must return the row quantity to 1")
+	insertOneRow(t, pgtestDB, tableName, "david", "insert row after explicit savepoint to test rollback to savepoint")
+	assertTableRowCount(t, pgtestDB, tableName, 2, "Inserted row works correctly")
+	execRollbackToSavepoint(t, pgtestDB, "pgtsp1")
+	assertTableRowCount(t, pgtestDB, tableName, 1, "Rollback must return the row quantity to 1")
 	execPgTestFullRollback(t, pgtestDB)
+	t.Log("SUCCESS: Explicit savepoint works correctly")
+}
 
-	// 4. Teste Savepoints aninhados
-	t.Run("nested_savepoints", func(t *testing.T) {
-		createTableWithValueColumn(t, pgtestDB, tableName)
-		execBegin(t, pgtestDB, "")
-		insertOneRow(t, pgtestDB, tableName, "nested_1", "insert first row in nested savepoints test")
-		execSavepoint(t, pgtestDB, "a")
-		insertOneRow(t, pgtestDB, tableName, "nested_2", "insert second row after first savepoint in nested savepoints test")
-		execSavepoint(t, pgtestDB, "b")
-		insertOneRow(t, pgtestDB, tableName, "nested_3", "insert third row after second savepoint in nested savepoints test")
-		execRollbackToSavepoint(t, pgtestDB, "b")
-		execRollbackToSavepoint(t, pgtestDB, "b")
-		assertTableRowCount(t, pgtestDB, tableName, 2, "Rollback to b must return the row quantity to 2")
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value IN ('nested_1', 'nested_2')", tableName), 2, "Nested SAVEPOINTs work correctly")
-		execCommit(t, pgtestDB)
-		assertTableRowCount(t, pgtestDB, tableName, 2, "Rollback to b must return the row quantity to 2")
-		execRollbackToInvalidSavepoint(t, pgtestDB, "b")
-		assertTableRowCount(t, pgtestDB, tableName, 2, "Rollback to b must return the row quantity to 2")
-		execRollbackToInvalidSavepoint(t, pgtestDB, "a")
-		assertTableRowCount(t, pgtestDB, tableName, 2, "Rollback to b must return the row quantity to 2")
-		execPgTestFullRollback(t, pgtestDB)
-		t.Log("SUCCESS: Nested savepoints works correctly")
-	})
+func TestTransactionHandling_NestedSavepoints(t *testing.T) {
+	testID := "test_txn_nested_savepoints"
+	pgtestDB := connectToPGTestProxy(t, testID)
+	defer pgtestDB.Close()
+	tableName := transactionHandlingTableName()
+
+	createTableWithValueColumn(t, pgtestDB, tableName)
+	execBegin(t, pgtestDB, "")
+	insertOneRow(t, pgtestDB, tableName, "nested_1", "insert first row in nested savepoints test")
+	execSavepoint(t, pgtestDB, "a")
+	insertOneRow(t, pgtestDB, tableName, "nested_2", "insert second row after first savepoint in nested savepoints test")
+	execSavepoint(t, pgtestDB, "b")
+	insertOneRow(t, pgtestDB, tableName, "nested_3", "insert third row after second savepoint in nested savepoints test")
+	execRollbackToSavepoint(t, pgtestDB, "b")
+	execRollbackToSavepoint(t, pgtestDB, "b")
+	assertTableRowCount(t, pgtestDB, tableName, 2, "Rollback to b must return the row quantity to 2")
+	assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value IN ('nested_1', 'nested_2')", tableName), 2, "Nested SAVEPOINTs work correctly")
+	execCommit(t, pgtestDB)
+	assertTableRowCount(t, pgtestDB, tableName, 2, "Rollback to b must return the row quantity to 2")
+	execRollbackToInvalidSavepoint(t, pgtestDB, "b")
+	assertTableRowCount(t, pgtestDB, tableName, 2, "Rollback to b must return the row quantity to 2")
+	execRollbackToInvalidSavepoint(t, pgtestDB, "a")
+	assertTableRowCount(t, pgtestDB, tableName, 2, "Rollback to b must return the row quantity to 2")
 	execPgTestFullRollback(t, pgtestDB)
+	t.Log("SUCCESS: Nested savepoints works correctly")
+}
 
-	// 4b. Same as nested_savepoints but RELEASE SAVEPOINT b instead of COMMIT; then verify we can still ROLLBACK TO SAVEPOINT a
-	t.Run("nested_savepoints_release_then_rollback_to_a", func(t *testing.T) {
-		createTableWithValueColumn(t, pgtestDB, tableName)
-		execBegin(t, pgtestDB, "")
-		insertOneRow(t, pgtestDB, tableName, "nested_1", "insert first row")
-		execSavepoint(t, pgtestDB, "a")
-		insertOneRow(t, pgtestDB, tableName, "nested_2", "insert second row after savepoint a")
-		execSavepoint(t, pgtestDB, "b")
-		insertOneRow(t, pgtestDB, tableName, "nested_3", "insert third row after savepoint b")
-		execRollbackToSavepoint(t, pgtestDB, "b")
-		execRollbackToSavepoint(t, pgtestDB, "b")
-		assertTableRowCount(t, pgtestDB, tableName, 2, "After rollback to b twice we have 2 rows")
-		execReleaseSavepoint(t, pgtestDB, "b")
-		assertTableRowCount(t, pgtestDB, tableName, 2, "After RELEASE SAVEPOINT b we still have 2 rows")
-		execRollbackToSavepoint(t, pgtestDB, "a")
-		assertTableRowCount(t, pgtestDB, tableName, 1, "After ROLLBACK TO SAVEPOINT a we have 1 row")
-		execPgTestFullRollback(t, pgtestDB)
-		t.Log("SUCCESS: RELEASE SAVEPOINT b then ROLLBACK TO SAVEPOINT a works correctly")
-	})
+func TestTransactionHandling_NestedSavepointsReleaseThenRollbackToA(t *testing.T) {
+	testID := "test_txn_nested_release_rollback_a"
+	pgtestDB := connectToPGTestProxy(t, testID)
+	defer pgtestDB.Close()
+	tableName := transactionHandlingTableName()
+
+	createTableWithValueColumn(t, pgtestDB, tableName)
+	execBegin(t, pgtestDB, "")
+	insertOneRow(t, pgtestDB, tableName, "nested_1", "insert first row")
+	execSavepoint(t, pgtestDB, "a")
+	insertOneRow(t, pgtestDB, tableName, "nested_2", "insert second row after savepoint a")
+	execSavepoint(t, pgtestDB, "b")
+	insertOneRow(t, pgtestDB, tableName, "nested_3", "insert third row after savepoint b")
+	execRollbackToSavepoint(t, pgtestDB, "b")
+	execRollbackToSavepoint(t, pgtestDB, "b")
+	assertTableRowCount(t, pgtestDB, tableName, 2, "After rollback to b twice we have 2 rows")
+	execReleaseSavepoint(t, pgtestDB, "b")
+	assertTableRowCount(t, pgtestDB, tableName, 2, "After RELEASE SAVEPOINT b we still have 2 rows")
+	execRollbackToSavepoint(t, pgtestDB, "a")
+	assertTableRowCount(t, pgtestDB, tableName, 1, "After ROLLBACK TO SAVEPOINT a we have 1 row")
 	execPgTestFullRollback(t, pgtestDB)
+	t.Log("SUCCESS: RELEASE SAVEPOINT b then ROLLBACK TO SAVEPOINT a works correctly")
+}
 
-	// 5. Teste RELEASE SAVEPOINT
-	t.Run("release_savepoint", func(t *testing.T) {
-		createTableWithValueColumn(t, pgtestDB, tableName)
-		execBegin(t, pgtestDB, "")
-		insertOneRow(t, pgtestDB, tableName, "release_test", "insert row before RELEASE SAVEPOINT test")
-		execSavepoint(t, pgtestDB, "sp_release")
-		execReleaseSavepoint(t, pgtestDB, "sp_release")
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'release_test'", tableName), 1, "RELEASE SAVEPOINT works correctly")
-		execReleaseSavepointExpectError(t, pgtestDB, "sp_release")
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'release_test'", tableName), 1, "State unchanged after invalid RELEASE")
-		execCommit(t, pgtestDB)
-		execPgTestFullRollback(t, pgtestDB)
-		t.Log("SUCCESS: Release savepoint works correctly")
-	})
+func TestTransactionHandling_ReleaseSavepoint(t *testing.T) {
+	testID := "test_txn_release_savepoint"
+	pgtestDB := connectToPGTestProxy(t, testID)
+	defer pgtestDB.Close()
+	tableName := transactionHandlingTableName()
+
+	createTableWithValueColumn(t, pgtestDB, tableName)
+	execBegin(t, pgtestDB, "")
+	insertOneRow(t, pgtestDB, tableName, "release_test", "insert row before RELEASE SAVEPOINT test")
+	execSavepoint(t, pgtestDB, "sp_release")
+	execReleaseSavepoint(t, pgtestDB, "sp_release")
+	assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'release_test'", tableName), 1, "RELEASE SAVEPOINT works correctly")
+	execReleaseSavepointExpectError(t, pgtestDB, "sp_release")
+	assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'release_test'", tableName), 1, "State unchanged after invalid RELEASE")
+	execCommit(t, pgtestDB)
 	execPgTestFullRollback(t, pgtestDB)
+	t.Log("SUCCESS: Release savepoint works correctly")
+}
 
-	// 6. Teste múltiplos BEGIN/COMMIT aninhados (pgtest converte em savepoints)
-	t.Run("nested_begin_commit", func(t *testing.T) {
-		createTableWithValueColumn(t, pgtestDB, tableName)
-		execBegin(t, pgtestDB, "")
-		insertOneRow(t, pgtestDB, tableName, "nested_begin_1", "insert first row in nested BEGIN/COMMIT test")
-		// Segundo BEGIN (convertido em SAVEPOINT sp_2)
-		execBegin(t, pgtestDB, "")
-		insertOneRow(t, pgtestDB, tableName, "nested_begin_2", "insert second row after second BEGIN in nested BEGIN/COMMIT test")
-		execCommit(t, pgtestDB)
-		assertTableRowCount(t, pgtestDB, tableName, 2, "Commit keep the 2 rows")
-		execCommit(t, pgtestDB)
-		assertTableRowCount(t, pgtestDB, tableName, 2, "Commit keep the 2 rows")
-		execPgTestFullRollback(t, pgtestDB)
-		t.Log("SUCCESS: Nested BEGIN/COMMIT works correctly")
-	})
+func TestTransactionHandling_NestedBeginCommit(t *testing.T) {
+	testID := "test_txn_nested_begin_commit"
+	pgtestDB := connectToPGTestProxy(t, testID)
+	defer pgtestDB.Close()
+	tableName := transactionHandlingTableName()
+
+	createTableWithValueColumn(t, pgtestDB, tableName)
+	execBegin(t, pgtestDB, "")
+	insertOneRow(t, pgtestDB, tableName, "nested_begin_1", "insert first row in nested BEGIN/COMMIT test")
+	execBegin(t, pgtestDB, "")
+	insertOneRow(t, pgtestDB, tableName, "nested_begin_2", "insert second row after second BEGIN in nested BEGIN/COMMIT test")
+	execCommit(t, pgtestDB)
+	assertTableRowCount(t, pgtestDB, tableName, 2, "Commit keep the 2 rows")
+	execCommit(t, pgtestDB)
+	assertTableRowCount(t, pgtestDB, tableName, 2, "Commit keep the 2 rows")
 	execPgTestFullRollback(t, pgtestDB)
+	t.Log("SUCCESS: Nested BEGIN/COMMIT works correctly")
+}
 
-	// 7. Teste comportamento após erro SQL (transação abortada)
-	t.Run("error_handling_aborted_transaction", func(t *testing.T) {
-		dropTableIfExists(t, pgtestDB, tableName)
-		createTableWithValueColumn(t, pgtestDB, tableName)
+func TestTransactionHandling_ErrorHandlingAbortedTransaction(t *testing.T) {
+	testID := "test_txn_error_handling"
+	pgtestDB := connectToPGTestProxy(t, testID)
+	defer pgtestDB.Close()
+	tableName := transactionHandlingTableName()
 
-		execBegin(t, pgtestDB, "")
-
-		// Insere um valor válido
-		insertOneRow(t, pgtestDB, tableName, "before_error", "insert valid row before testing error handling")
-
-		// Tenta inserir valor duplicado (erro esperado)
-		insertDuplicateRow(t, pgtestDB, tableName, 1, "duplicate")
-
-		// Com pgtest SafeExec, um comando que falha só reverte o guard savepoint; a transação principal
-		// segue válida. Aqui apenas fazemos ROLLBACK e verificamos que tudo foi revertido.
-
-		// ROLLBACK para limpar e reverter todas as mudanças
-		execRollbackOrFail(t, pgtestDB)
-
-		// Verifica que 'before_error' não existe (foi revertido pelo ROLLBACK)
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'before_error'", tableName), 0, "ROLLBACK after error correctly reverted all changes")
-	})
+	dropTableIfExists(t, pgtestDB, tableName)
+	createTableWithValueColumn(t, pgtestDB, tableName)
+	execBegin(t, pgtestDB, "")
+	insertOneRow(t, pgtestDB, tableName, "before_error", "insert valid row before testing error handling")
+	insertDuplicateRow(t, pgtestDB, tableName, 1, "duplicate")
+	execRollbackOrFail(t, pgtestDB)
+	assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'before_error'", tableName), 0, "ROLLBACK after error correctly reverted all changes")
 	execPgTestFullRollback(t, pgtestDB)
-
-	// Limpa a transação do pgtest
-	execPgtestRollback(t, pgtestDB)
-
-	// Verifica que a tabela não existe mais após o rollback do pgtest
 	assertTableDoesNotExist(t, pgtestDB, tableName, "Table does not exist after pgtest rollback")
 }
 

@@ -16,20 +16,22 @@ import (
 
 // ExecuteInterpretedQuery recebe uma query que já passou por parse e interceptação.
 // Ela decide se é comando único ou múltiplos comandos e encaminha para o banco.
+// args são os parâmetros bound (Extended Query); para Simple Query não passar args.
 //
 // sendReadyForQuery:
 //   - true para fluxo "Simple Query" (envia ReadyForQuery ao final).
 //   - false para fluxo "Extended Query" (não envia, espera-se recebimento de Sync depois).
-func (p *proxyConnection) ExecuteInterpretedQuery(testID string, query string, sendReadyForQuery bool) error {
+func (p *proxyConnection) ExecuteInterpretedQuery(testID string, query string, sendReadyForQuery bool, args ...any) error {
 	commands := sql.SplitCommands(query)
 	if len(commands) > 1 {
 		return p.ForwardMultipleCommandsToDB(testID, commands, sendReadyForQuery)
 	}
-	return p.ForwardCommandToDB(testID, query, sendReadyForQuery)
+	return p.ForwardCommandToDB(testID, query, sendReadyForQuery, args...)
 }
 
 // ForwardCommandToDB executa um único comando SQL na conexão/transação ativa.
-func (p *proxyConnection) ForwardCommandToDB(testID string, query string, sendReadyForQuery bool) error {
+// args são os parâmetros para query parametrizada (Extended Query); opcional.
+func (p *proxyConnection) ForwardCommandToDB(testID string, query string, sendReadyForQuery bool, args ...any) error {
 	session := p.server.Pgtest.GetSession(testID)
 	if session == nil || session.DB == nil {
 		return fmt.Errorf("sessão não encontrada para testID: %s", testID)
@@ -40,8 +42,9 @@ func (p *proxyConnection) ForwardCommandToDB(testID string, query string, sendRe
 		return fmt.Errorf("sessão sem transação ativa para testID: %s", testID)
 	}
 
-	if sql.IsSelect(query) {
-		return p.ExecuteSelectQuery(testID, query, sendReadyForQuery)
+	// SELECT and INSERT/UPDATE/DELETE ... RETURNING return rows; use Query path and send result set.
+	if sql.ReturnsResultSet(query) {
+		return p.ExecuteSelectQuery(testID, query, sendReadyForQuery, args...)
 	}
 
 	var tag pgconn.CommandTag
@@ -56,14 +59,14 @@ func (p *proxyConnection) ForwardCommandToDB(testID string, query string, sendRe
 	isTransactionControl := cmdType == "SAVEPOINT" || cmdType == "RELEASE" || cmdType == "ROLLBACK"
 
 	if isTransactionControl {
-		tag, err = session.DB.SafeExecTCL(context.Background(), query)
+		tag, err = session.DB.SafeExecTCL(context.Background(), query, args...)
 		if err != nil {
 			log.Printf("[PROXY] Erro na execução transacional (TCL): %v", err)
 			err = fmt.Errorf("falha ao executar comando TCL: %w", err)
 			return err
 		}
 	} else {
-		tag, err = session.DB.SafeExec(context.Background(), query)
+		tag, err = session.DB.SafeExec(context.Background(), query, args...)
 		if err != nil {
 			return err
 		}
@@ -231,20 +234,20 @@ func (p *proxyConnection) ForwardMultipleCommandsToDB(testID string, commands []
 //	return rows, err
 //}
 
-// ExecuteSelectQuery executa um SELECT simples e envia os resultados.
-func (p *proxyConnection) ExecuteSelectQuery(testID string, query string, sendReadyForQuery bool) error {
+// ExecuteSelectQuery executa um SELECT e envia os resultados. args são parâmetros (Extended Query); opcional.
+func (p *proxyConnection) ExecuteSelectQuery(testID string, query string, sendReadyForQuery bool, args ...any) error {
 	session := p.server.Pgtest.GetSession(testID)
 	if session == nil {
 		return fmt.Errorf("sessão não encontrada para testID: %s", testID)
 	}
 
-	rows, err := session.DB.SafeQuery(context.Background(), query)
+	rows, err := session.DB.SafeQuery(context.Background(), query, args...)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 
-	if err := p.SendSelectResults(rows); err != nil {
+	if err := p.SendSelectResultsWithQuery(rows, query); err != nil {
 		return err
 	}
 

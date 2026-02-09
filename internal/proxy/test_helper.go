@@ -1,8 +1,6 @@
 package proxy
 
 import (
-	"os"
-	"path/filepath"
 	"time"
 
 	"pgtest-transient/internal/config"
@@ -15,44 +13,6 @@ func logIfVerbose(format string, args ...interface{}) {
 	testutil.LogIfVerbose(format, args...)
 }
 
-// findProjectRoot encontra a raiz do projeto (onde está go.mod)
-func findProjectRoot() string {
-	dir, _ := os.Getwd()
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	return ""
-}
-
-// resolveConfigPath resolve o caminho do arquivo de configuração
-func resolveConfigPath() string {
-	if envPath := os.Getenv("PGTEST_CONFIG"); envPath != "" {
-		if filepath.IsAbs(envPath) {
-			return envPath
-		}
-		projectRoot := findProjectRoot()
-		if projectRoot != "" {
-			return filepath.Join(projectRoot, envPath)
-		}
-		workDir, _ := os.Getwd()
-		return filepath.Join(workDir, envPath)
-	}
-
-	projectRoot := findProjectRoot()
-	if projectRoot != "" {
-		return filepath.Join(projectRoot, "config", "pgtest-transient.yaml")
-	}
-	workDir, _ := os.Getwd()
-	return filepath.Join(workDir, "config", "pgtest-transient.yaml")
-}
-
 // newPGTestFromConfig cria uma instância PGTest a partir da configuração
 // Tenta carregar de:
 // 1. Variável de ambiente PGTEST_CONFIG (se definida)
@@ -62,20 +22,17 @@ func resolveConfigPath() string {
 func newPGTestFromConfig() *PGTest {
 	var cfg *config.Config
 	var err error
-	configPath := resolveConfigPath()
-
-	if configPath != "" {
-		logIfVerbose("Trying config path: %s", configPath)
+	configPath := testutil.ConfigPath()
+	if configPath == "" {
+		return nil
+	}
+	logIfVerbose("Trying config path: %s", configPath)
+	cfg, err = config.LoadConfig(configPath)
+	if err != nil {
+		logIfVerbose("Warning: Failed to load config from %s: %v", configPath, err)
+		// Tenta busca automática
+		configPath = ""
 		cfg, err = config.LoadConfig(configPath)
-		if err != nil {
-			logIfVerbose("Warning: Failed to load config from %s: %v", configPath, err)
-			// Tenta busca automática
-			configPath = ""
-			cfg, err = config.LoadConfig(configPath)
-		}
-	} else {
-		// Busca automática
-		cfg, err = config.LoadConfig("")
 	}
 
 	if err != nil {

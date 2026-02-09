@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"pgtest-transient/pkg/protocol"
 	"pgtest-transient/pkg/sql"
@@ -15,8 +16,46 @@ import (
 // SendSelectResults itera sobre as linhas de um resultado pgx e envia para o cliente.
 // Envia RowDescription e DataRow(s), seguido de CommandComplete.
 func (p *proxyConnection) SendSelectResults(rows pgx.Rows) error {
-	fieldDescs := rows.FieldDescriptions()
-	fields := protocol.ConvertFieldDescriptions(fieldDescs)
+	return p.SendSelectResultsWithQuery(rows, "")
+}
+
+// SendSelectResultsWithQuery envia resultados; se query tiver RETURNING, usa o mesmo RowDescription
+// sintético do Describe para que clientes (ex.: PHP PDO) que dependem da consistência recebam a linha.
+func (p *proxyConnection) SendSelectResultsWithQuery(rows pgx.Rows, query string) error {
+	var fields []pgproto3.FieldDescription
+	var returnOIDs []uint32 // when set, we use synthetic RowDescription (Format 0) and must send text values
+	returnsSet := query != "" && sql.ReturnsResultSet(query)
+	cols := sql.ReturningColumns(query)
+	if returnsSet && len(cols) > 0 {
+		// Use synthetic RowDescription (name, type, Format 0) so client gets consistent result; convert row values to text below.
+		names := make([]string, len(cols))
+		oids := make([]uint32, len(cols))
+		for i, c := range cols {
+			names[i] = c.Name
+			oids[i] = c.OID
+		}
+		fields = protocol.FieldDescriptionsFromNamesAndOIDs(names, oids)
+		returnOIDs = oids
+	}
+	if fields == nil {
+		fieldDescs := rows.FieldDescriptions()
+		// Single-column result: ensure correct name and text format for Eloquent/PHP.
+		// Backend sometimes returns a truncated query as column name for RETURNING; use canonical "id" + text.
+		// Also handle pgx returning empty FieldDescriptions before Next(): single int column is typically RETURNING id.
+		if len(fieldDescs) == 1 {
+			oid := fieldDescs[0].DataTypeOID
+			if oid == 20 || oid == 23 || strings.Contains(strings.ToUpper(fieldDescs[0].Name), "RETURNING") {
+				if oid != 20 && oid != 23 {
+					oid = 20
+				}
+				fields = protocol.FieldDescriptionsFromNamesAndOIDs([]string{"id"}, []uint32{oid})
+				returnOIDs = []uint32{oid}
+			}
+		}
+		if fields == nil {
+			fields = protocol.ConvertFieldDescriptions(fieldDescs)
+		}
+	}
 	if os.Getenv("PGTEST_LOG_MESSAGE_ORDER") == "1" {
 		log.Printf("[MSG_ORDER] SEND RowDescription: %d cols", len(fields))
 	}
@@ -25,10 +64,27 @@ func (p *proxyConnection) SendSelectResults(rows pgx.Rows) error {
 	rowCount := 0
 	for rows.Next() {
 		rowCount++
-		// Usa RawValues() para obter bytes brutos no formato correto (text ou binary)
-		// Isso evita problemas de conversão, pois já vem no formato do protocolo PostgreSQL
 		rawValues := rows.RawValues()
+		if len(returnOIDs) > 0 && len(rawValues) == len(returnOIDs) {
+			// Synthetic RowDescription uses Format 0 (text); convert binary backend values to text
+			textValues := make([][]byte, len(rawValues))
+			for i, raw := range rawValues {
+				oid := uint32(25)
+				if i < len(returnOIDs) {
+					oid = returnOIDs[i]
+				}
+				textValues[i] = protocol.RawValueToText(oid, raw)
+			}
+			rawValues = textValues
+		}
 		p.backend.Send(&pgproto3.DataRow{Values: rawValues})
+	}
+	if query != "" && sql.ReturnsResultSet(query) && rowCount == 0 {
+		preview := strings.TrimSpace(query)
+		if len(preview) > 120 {
+			preview = preview[:120] + "..."
+		}
+		log.Printf("[PROXY] INSERT/UPDATE/DELETE RETURNING returned 0 rows (cols=%d); client may get empty result; query: %s", len(fields), preview)
 	}
 	if os.Getenv("PGTEST_LOG_MESSAGE_ORDER") == "1" {
 		log.Printf("[MSG_ORDER] SEND DataRows: %d", rowCount)

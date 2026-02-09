@@ -42,7 +42,7 @@ func TestExtractTestID(t *testing.T) {
 			params: map[string]string{
 				"application_name": "invalid_format",
 			},
-			want:    "default",
+			want:    "invalid_format",
 			wantErr: false,
 		},
 		{

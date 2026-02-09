@@ -10,7 +10,22 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgproto3"
 )
+
+// BackendStartupCache holds ParameterStatus and BackendKeyData from the real PostgreSQL
+// so we can replay them to clients when they connect to pgtest instead of hardcoded values.
+type BackendStartupCache struct {
+	ParameterStatuses []pgproto3.ParameterStatus // order preserved for consistent client behavior
+	BackendKeyData    pgproto3.BackendKeyData
+}
+
+// Well-known parameter names that PostgreSQL sends after connection (we copy these from the real server).
+var backendStartupParameterNames = []string{
+	"server_version", "server_encoding", "client_encoding", "DateStyle", "TimeZone", "session_authorization",
+	"integer_datetimes", "standard_conforming_strings", "application_name", "default_transaction_read_only",
+	"intervalStyle", "is_superuser",
+}
 
 type TestSession struct {
 	DB           *realSessionDB // abstraction over connection + transaction; use DB.Query/Exec for all commands
@@ -31,6 +46,9 @@ type PGTest struct {
 	SessionTimeout    time.Duration
 	KeepaliveInterval time.Duration // intervalo de ping pgtest->PostgreSQL por conexão; 0 = desligado
 	mu                sync.RWMutex
+
+	// backendStartupCache is filled from the first real PostgreSQL connection and replayed to clients.
+	backendStartupCache *BackendStartupCache
 }
 
 func (p *PGTest) GetTestID(session *TestSession) string {
@@ -73,7 +91,10 @@ func NewPGTest(postgresHost string, postgresPort int, postgresDB, postgresUser, 
 // e a sessão guarda sua DB (connection + transaction). Tudo fica sob TestSession, indexado por testID.
 func (p *PGTest) GetOrCreateSession(testID string) (*TestSession, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	defer func() {
+		p.mu.TryLock()
+		p.mu.Unlock()
+	}()
 
 	// Reutiliza sessão existente se disponível
 	// Isso significa que estamos reutilizando a conexão PostgreSQL e a transação
@@ -87,17 +108,20 @@ func (p *PGTest) GetOrCreateSession(testID string) (*TestSession, error) {
 			delete(p.SessionsByTestID, testID)
 		} else {
 			session.mu.Unlock()
+			p.mu.Unlock()
 			return session, nil
 		}
 	}
+	p.mu.Unlock()
 
 	// Cria nova sessão para este testID (conexão fica na sessão)
 	session, err := p.createNewSession(testID)
 	if err != nil {
 		return nil, err
 	}
-
+	p.mu.Lock()
 	p.SessionsByTestID[testID] = session
+	p.mu.Unlock()
 	return session, nil
 }
 
@@ -140,6 +164,7 @@ func (p *PGTest) createNewSession(testID string) (*TestSession, error) {
 	}
 
 	db := newSessionDB(conn, tx)
+	p.fillBackendStartupCacheIfNeeded(db.PgConn())
 	//if p.KeepaliveInterval > 0 {
 	//	db.startKeepalive(p.KeepaliveInterval)
 	//}
@@ -151,6 +176,36 @@ func (p *PGTest) createNewSession(testID string) (*TestSession, error) {
 	}
 
 	return session, nil
+}
+
+// fillBackendStartupCacheIfNeeded copies ParameterStatus from the real PostgreSQL connection into the
+// cache so we can replay them to clients. Called when creating a new session; only fills once.
+// BackendKeyData is not exposed by pgx PgConn, so we keep a default value.
+func (p *PGTest) fillBackendStartupCacheIfNeeded(pgConn *pgconn.PgConn) {
+	if pgConn == nil {
+		return
+	}
+	if p.backendStartupCache != nil {
+		return
+	}
+	var params []pgproto3.ParameterStatus
+	for _, name := range backendStartupParameterNames {
+		value := pgConn.ParameterStatus(name)
+		if value != "" {
+			params = append(params, pgproto3.ParameterStatus{Name: name, Value: value})
+		}
+	}
+	p.backendStartupCache = &BackendStartupCache{
+		ParameterStatuses: params,
+		BackendKeyData:    pgproto3.BackendKeyData{ProcessID: 12345, SecretKey: 67890}, // pgx does not expose; keep default
+	}
+}
+
+// GetBackendStartupCache returns the cached backend startup messages from the real PostgreSQL, or nil if not yet filled.
+func (p *PGTest) GetBackendStartupCache() *BackendStartupCache {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.backendStartupCache
 }
 
 // isConnClosedOrFatal indica se o erro significa que a conexão com o PostgreSQL já está morta.

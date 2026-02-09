@@ -18,7 +18,7 @@ import (
 
 const (
 	// ConnectionTimeout é o timeout para operações de leitura/escrita nas conexões
-	ConnectionTimeout = 60 * time.Second
+	ConnectionTimeout = 3600 * time.Second
 	// DefaultSessionTimeout é o timeout padrão para sessões se não especificado
 	DefaultSessionTimeout = 24 * time.Hour
 	// DefaultListenPort é a porta padrão de escuta se não especificada
@@ -225,22 +225,27 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 				log.Printf("Error writing SSL response: %v", err)
 				return
 			}
+			// Backend normal após tratar SSLRequest
+			backend := pgproto3.NewBackend(clientConn, clientConn)
+			s.processConnectionStartupMessage(backend, clientConn)
+			return
 		} else {
 			// Reconstruir bytes lidos
 			backend := s.createBackendWithPreRead(clientConn, 8, length, code)
 			s.processConnectionStartupMessage(backend, clientConn)
 			return
 		}
+		//// Length 8 was the SSL (or cancel) request; we consumed it. Next wire content is the StartupMessage.
+		//// Do not feed the 8 bytes back into the backend or ReceiveStartupMessage() will misparse (length=8 + 4 bytes body) and params/testID can be wrong, breaking the handshake.
+		//backend := pgproto3.NewBackend(clientConn, clientConn)
+		//s.processConnectionStartupMessage(backend, clientConn)
+		//return
 	} else {
-		// Reconstruir bytes do length
+		// First message is the StartupMessage: we read only the 4-byte length; put it back so the backend sees length + body.
 		backend := s.createBackendWithPreRead(clientConn, 4, length, 0)
 		s.processConnectionStartupMessage(backend, clientConn)
 		return
 	}
-
-	// Backend normal após tratar SSLRequest
-	backend := pgproto3.NewBackend(clientConn, clientConn)
-	s.processConnectionStartupMessage(backend, clientConn)
 }
 
 // createBackendWithPreRead cria um backend reconstruindo bytes já lidos

@@ -53,12 +53,23 @@ func (server *Server) startProxy(testID string, clientConn net.Conn, backend *pg
 	proxy.RunMessageLoop(testID)
 }
 
-// sendInitialProtocolMessages envia as mensagens iniciais do protocolo PostgreSQL
+// sendInitialProtocolMessages sends the initial PostgreSQL protocol messages to the client.
+// When we have a cache from the real PostgreSQL (first connection), we replay those;
+// otherwise we fall back to hardcoded defaults.
 func (p *proxyConnection) sendInitialProtocolMessages() error {
-	p.backend.Send(&pgproto3.ParameterStatus{Name: "server_version", Value: "14.0"})
-	p.backend.Send(&pgproto3.ParameterStatus{Name: "client_encoding", Value: "UTF8"})
-	p.backend.Send(&pgproto3.ParameterStatus{Name: "DateStyle", Value: "ISO"})
-	p.backend.Send(&pgproto3.BackendKeyData{ProcessID: 12345, SecretKey: 67890})
+	cache := p.server.Pgtest.GetBackendStartupCache()
+	if cache != nil && len(cache.ParameterStatuses) > 0 {
+		for i := range cache.ParameterStatuses {
+			ps := &cache.ParameterStatuses[i]
+			p.backend.Send(&pgproto3.ParameterStatus{Name: ps.Name, Value: ps.Value})
+		}
+		p.backend.Send(&pgproto3.BackendKeyData{ProcessID: cache.BackendKeyData.ProcessID, SecretKey: cache.BackendKeyData.SecretKey})
+	} else {
+		p.backend.Send(&pgproto3.ParameterStatus{Name: "server_version", Value: "14.0"})
+		p.backend.Send(&pgproto3.ParameterStatus{Name: "client_encoding", Value: "UTF8"})
+		p.backend.Send(&pgproto3.ParameterStatus{Name: "DateStyle", Value: "ISO"})
+		p.backend.Send(&pgproto3.BackendKeyData{ProcessID: 12345, SecretKey: 67890})
+	}
 	p.backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 
 	if err := p.backend.Flush(); err != nil {

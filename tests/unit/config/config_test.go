@@ -6,33 +6,16 @@ import (
 	"testing"
 
 	"pgtest-transient/internal/config"
+	"pgtest-transient/internal/testutil"
+	tstproxy "pgtest-transient/tests/unit/proxy"
 )
 
-// findProjectRoot encontra a raiz do projeto (onde está go.mod)
-func findProjectRoot() string {
-	dir, _ := os.Getwd()
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	return ""
-}
-
 func TestLoadConfig_FromFile(t *testing.T) {
-	// Testa carregamento de arquivo específico
-	// Resolve caminho relativo à raiz do projeto
-	projectRoot := findProjectRoot()
-	if projectRoot == "" {
+	// Testa carregamento de arquivo específico (path unificado via testutil)
+	configPath := testutil.ConfigPath()
+	if testutil.ProjectRoot() == "" {
 		t.Skip("Could not find project root (go.mod not found)")
 	}
-
-	configPath := filepath.Join(projectRoot, "config", "pgtest-transient.yaml")
 
 	// Verifica se arquivo existe antes de testar
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
@@ -152,7 +135,7 @@ func TestLoadConfig_FromEnvVar(t *testing.T) {
 	configPath := "config/pgtest-transient.yaml"
 	os.Setenv("PGTEST_CONFIG", configPath)
 
-	cfg, err := config.LoadConfig("")
+	cfg, err := config.LoadConfig(tstproxy.GetConfigPath())
 	if err != nil {
 		t.Fatalf("config.LoadConfig() with PGTEST_CONFIG error = %v", err)
 	}
@@ -179,15 +162,13 @@ func TestLoadConfig_EnvOverrides(t *testing.T) {
 		}
 	}()
 
-	// Resolve caminho do arquivo de config
-	projectRoot := findProjectRoot()
-	if projectRoot == "" {
+	// Resolve caminho do arquivo de config (unificado via testutil)
+	if testutil.ProjectRoot() == "" {
 		t.Skip("Could not find project root (go.mod not found)")
 	}
+	configPath := testutil.ConfigPath()
 
-	configPath := filepath.Join(projectRoot, "config", "pgtest-transient.yaml")
-
-	// Se arquivo não existe, cria um temporário para teste
+	// Se arquivo não existe, usa busca automática
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		// Usa busca automática (vai usar valores padrão)
 		configPath = ""
@@ -216,12 +197,11 @@ func TestLoadConfig_EnvOverrides(t *testing.T) {
 }
 
 func TestLoadConfig_ValidYAML(t *testing.T) {
-	// Testa se arquivo YAML válido é parseado corretamente
-	projectRoot := findProjectRoot()
+	// Testa se arquivo YAML válido é parseado corretamente (pgtest.yaml, não transient)
+	projectRoot := testutil.ProjectRoot()
 	if projectRoot == "" {
 		t.Skip("Could not find project root (go.mod not found)")
 	}
-
 	configPath := filepath.Join(projectRoot, "config", "pgtest.yaml")
 
 	// Verifica se arquivo existe
@@ -284,15 +264,11 @@ func TestLoadConfig_FileNotFound_ExplicitPath(t *testing.T) {
 }
 
 func TestLoadConfig_ProjectRootDetection(t *testing.T) {
-	// Testa se consegue encontrar arquivo relativo à raiz do projeto
-	projectRoot := findProjectRoot()
-	if projectRoot == "" {
+	// Testa se consegue encontrar arquivo relativo à raiz do projeto (path unificado)
+	if testutil.ProjectRoot() == "" {
 		t.Skip("Could not find project root (go.mod not found)")
 	}
-
-	// Tenta carregar config/pgtest-transient.yaml usando caminho relativo
-	// LoadConfig deve resolver relativo ao diretório de trabalho atual
-	configPath := filepath.Join(projectRoot, "config", "pgtest-transient.yaml")
+	configPath := testutil.ConfigPath()
 
 	// Verifica se arquivo existe
 	if _, statErr := os.Stat(configPath); statErr == nil {
@@ -337,9 +313,10 @@ func TestLoadConfigByCommandLine(t *testing.T) {
 	}
 
 	// Testa com busca automática (deve usar valores padrão)
-	cfg, err = config.LoadConfig("")
+	t.Logf("Root Config path: %v", tstproxy.GetConfigPath())
+	cfg, err = config.LoadConfig(tstproxy.GetConfigPath())
 	if err != nil {
-		t.Fatalf("config.LoadConfig(\"\") error = %v, want nil", err)
+		t.Fatalf("config.LoadConfig(\"\") error = %v, want nil, root considered: %v", err, tstproxy.GetConfigPath())
 	}
 
 	// Verifica apenas que os valores padrão foram aplicados (não são vazios/nulos)

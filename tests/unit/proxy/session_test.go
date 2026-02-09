@@ -16,11 +16,8 @@ func TestGetOrCreateSession(t *testing.T) {
 	t.Run("create_new_session", func(t *testing.T) {
 		testID := "test123"
 		session, err := pgtest.GetOrCreateSession(testID)
-		if err == nil {
-			t.Logf("Session created (this test requires PostgreSQL connection)")
-			if pgtest.GetTestID(session) != testID {
-				t.Errorf("Session.TestID = %v, want %v", pgtest.GetTestID(session), testID)
-			}
+		if err != nil {
+			t.Errorf("Session.TestID = %v, want %v due to error: %v", pgtest.GetTestID(session), testID, err)
 		}
 	})
 
@@ -28,7 +25,7 @@ func TestGetOrCreateSession(t *testing.T) {
 		testID := "test456"
 		session1, err1 := pgtest.GetOrCreateSession(testID)
 		if err1 != nil {
-			t.Skip("Skipping test - requires PostgreSQL connection")
+			t.Fatalf("GetOrCreateSession() error = %v", err1)
 		}
 
 		session2, err2 := pgtest.GetOrCreateSession(testID)
@@ -100,12 +97,12 @@ func TestGetAllSessions(t *testing.T) {
 
 		session1, err1 := pgtest.GetOrCreateSession(testID1)
 		if err1 != nil {
-			t.Skip("Skipping test - requires PostgreSQL connection")
+			t.Fatalf("1 - multiple_sessions GetOrCreateSession() error = %v", err1)
 		}
 
 		session2, err2 := pgtest.GetOrCreateSession(testID2)
 		if err2 != nil {
-			t.Fatalf("GetOrCreateSession() error = %v", err2)
+			t.Fatalf("2 - multiple_sessions GetOrCreateSession() error = %v", err2)
 		}
 
 		sessions := pgtest.GetAllSessions()
@@ -140,7 +137,7 @@ func TestDestroySession(t *testing.T) {
 		testID := "test_destroy_session"
 		session, err := pgtest.GetOrCreateSession(testID)
 		if err != nil {
-			t.Skip("Skipping test - requires PostgreSQL connection")
+			t.Fatalf("GetOrCreateSession() error = %v", err)
 		}
 
 		if session == nil {
@@ -168,33 +165,31 @@ func TestDestroySession(t *testing.T) {
 func TestCleanupExpiredSessions(t *testing.T) {
 	// Para este teste específico, precisamos de um timeout curto
 	// Carrega config e usa timeout curto para o teste
-	cfg, err := config.LoadConfig("")
+	cfg, err := config.LoadConfig(GetConfigPath())
 	var pgtest *proxy.PGTest
 	if err != nil {
-		// Fallback se não conseguir carregar config
-		pgtest = proxy.NewPGTest("localhost", 5432, "postgres", "postgres", "", 100*time.Millisecond, 24*time.Hour, 0)
-	} else {
-		sessionTimeout := cfg.Postgres.SessionTimeout.Duration
-		if sessionTimeout <= 0 {
-			sessionTimeout = 24 * time.Hour
-		}
-		pgtest = proxy.NewPGTest(
-			cfg.Postgres.Host,
-			cfg.Postgres.Port,
-			cfg.Postgres.Database,
-			cfg.Postgres.User,
-			cfg.Postgres.Password,
-			100*time.Millisecond, // Timeout curto para o teste
-			sessionTimeout,
-			0, // keepalive desligado no teste
-		)
+		t.Fatalf("Failed to load config: %v", err)
 	}
+	sessionTimeout := cfg.Postgres.SessionTimeout.Duration
+	if sessionTimeout <= 0 {
+		sessionTimeout = 24 * time.Hour
+	}
+	pgtest = proxy.NewPGTest(
+		cfg.Postgres.Host,
+		cfg.Postgres.Port,
+		cfg.Postgres.Database,
+		cfg.Postgres.User,
+		cfg.Postgres.Password,
+		100*time.Millisecond, // Timeout curto para o teste
+		sessionTimeout,
+		0, // keepalive desligado no teste
+	)
 
 	// Cria uma sessão que vai expirar usando GetOrCreateSession primeiro
 	testID := "expired_session_test"
 	session, err := pgtest.GetOrCreateSession(testID)
 	if err != nil {
-		t.Skip("Skipping test - requires PostgreSQL connection")
+		t.Fatalf("GetOrCreateSession() error = %v", err)
 	}
 
 	// Ajusta as datas para simular sessão expirada
@@ -215,9 +210,7 @@ func TestCleanupExpiredSessions(t *testing.T) {
 }
 
 func TestSessionTimeout(t *testing.T) {
-	// Testa especificamente o comportamento de timeout de sessão
-	// Usa timeout muito curto (30ms) para teste rápido
-	cfg, err := config.LoadConfig("")
+	cfg, err := config.LoadConfig(GetConfigPath())
 	if err != nil {
 		t.Fatalf("Failed to load config: %v", err)
 	}
@@ -239,7 +232,7 @@ func TestSessionTimeout(t *testing.T) {
 	testID := "timeout_test_session"
 	_, err = pgtest.GetOrCreateSession(testID)
 	if err != nil {
-		t.Skip("Skipping test - requires PostgreSQL connection")
+		t.Fatalf("GetOrCreateSession() error = %v", err)
 	}
 
 	// Verifica que a sessão existe

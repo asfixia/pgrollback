@@ -8,7 +8,6 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -23,26 +22,7 @@ import (
 var pgtestConfig *config.Config
 
 func init() {
-	configPath := os.Getenv("PGTEST_CONFIG")
-	if configPath == "" {
-		// Tenta encontrar o arquivo de config relativo à raiz do projeto
-		workDir, _ := os.Getwd()
-		// Procura por go.mod para encontrar a raiz do projeto
-		projectRoot := workDir
-		for {
-			if _, err := os.Stat(filepath.Join(projectRoot, "go.mod")); err == nil {
-				break
-			}
-			parent := filepath.Dir(projectRoot)
-			if parent == projectRoot {
-				// Não encontrou go.mod, usa diretório atual
-				projectRoot = workDir
-				break
-			}
-			projectRoot = parent
-		}
-		configPath = filepath.Join(projectRoot, "config", "pgtest-transient.yaml")
-	}
+	configPath := testutil.ConfigPath()
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
 		fmt.Printf("Failed to load config: %v\n", err)

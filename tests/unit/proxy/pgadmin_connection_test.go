@@ -6,68 +6,42 @@ import (
 	"testing"
 	"time"
 
-	"pgtest-transient/internal/config"
-	"pgtest-transient/internal/proxy"
-
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 func TestPGAdminLikeConnection(t *testing.T) {
-	configPath := getConfigPath()
-	cfg, err := config.LoadConfig(configPath)
-	if err != nil {
-		t.Skipf("Skipping test - failed to load config: %v", err)
+	cfg := getConfigForProxyTest(t)
+	if cfg == nil {
 		return
 	}
 
-	contextTimeout := getOrDefault(cfg.Test.ContextTimeout.Duration, 10*time.Second)
-	ctx, cancel := context.WithTimeout(context.Background(), contextTimeout)
-	defer cancel()
-
-	// Usa porta diferente para evitar conflitos com outros testes
-	testPort := cfg.Proxy.ListenPort
-	testHost := cfg.Proxy.ListenHost
-	// Verifica se a porta está disponível antes de iniciar o servidor
-	ensurePortIsAvailable(t, testHost, testPort)
-
-	proxyServer := proxy.NewServer(
-		cfg.Postgres.Host,
-		cfg.Postgres.Port,
-		cfg.Postgres.Database,
-		cfg.Postgres.User,
-		cfg.Postgres.Password,
-		cfg.Proxy.Timeout,
-		cfg.Postgres.SessionTimeout.Duration,
-		0, // keepalive desligado no teste
-		testHost,
-		testPort,
-	)
-	if err := proxyServer.StartError(); err != nil {
-		t.Fatalf("Failed to start proxy server: %v", err)
-	}
-
-	defer stopProxyServer(proxyServer)
-
-	// Aguarda o servidor proxy estar pronto para aceitar conexões
-	waitForProxyServerToListen(t, testHost, testPort)
-
-	// Verifica se o PostgreSQL real está disponível antes de continuar
-	// Se não estiver disponível, faz skip do teste (pode acontecer quando muitos testes rodam simultaneamente)
 	if !isPostgreSQLAvailable(t, cfg.Postgres.Host, cfg.Postgres.Port, cfg.Postgres.Database, cfg.Postgres.User, cfg.Postgres.Password) {
 		t.Skipf("Skipping test - PostgreSQL is not available at %s:%d", cfg.Postgres.Host, cfg.Postgres.Port)
 		return
 	}
 
-	// Usa application_name específico para este teste
-	// Isso garante que o teste usa um testID identificável e pode testar reutilização de conexões
-	testApplicationName := "pgtest_pgadmin_connection_test"
-	db := connectToProxyServer(t, ctx, testHost, testPort, cfg.Postgres.Database, cfg.Postgres.User, cfg.Postgres.Password, testApplicationName, cfg.Test.PingTimeout.Duration)
-	defer db.Close()
+	db, ctx, cleanup := connectToProxyForTest(t, "pgadmin_connection_test")
+	defer cleanup()
 
 	queryTimeout := getOrDefault(cfg.Test.QueryTimeout.Duration, 5*time.Second)
 	t.Logf("Setting query timeout to: %v", queryTimeout)
 	queryCtx, queryCancel := context.WithTimeout(ctx, queryTimeout)
 	defer queryCancel()
+
+	rows, err := db.QueryContext(queryCtx, "SELECT 1")
+	if err != nil {
+		t.Fatalf("Failed to execute simple query: %v", err)
+	}
+	rowCount2 := 0
+	for rows.Next() {
+		rowCount2++
+		var result int32
+		if err := rows.Scan(&result); err != nil {
+			t.Fatalf("Failed to scan result: %v", err)
+		}
+		t.Logf("Query result row %d: %d", rowCount2, result)
+	}
+	rows.Close()
 
 	t.Logf("About to execute pgAdmin initial query with timeout: %v", queryTimeout)
 	startTime := time.Now()
@@ -95,8 +69,23 @@ func connectToProxyServer(t *testing.T, ctx context.Context, host string, port i
 	// Por isso é importante fazer um Ping após Open para verificar se a conexão pode ser estabelecida
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
-		t.Fatalf("Failed to open database connection to proxy server: %v\n Connection: %s", err, dsn)
+		t.Fatalf("Error: Failed to open database connection to proxy server: %v\n Connection: %s", err, dsn)
 	}
+	if db == nil {
+		t.Fatalf("Error: Failed to open database connection to proxy server: %v\n Connection: %s", err, dsn)
+	}
+	internalDb, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("Error: Failed to get the internal connection to proxy server: %v\n Connection: %s", err, dsn)
+	}
+	if internalDb == nil {
+		t.Fatalf("Error: The internal connection is nil without error: %v\n Connection: %s", err, dsn)
+	}
+	internalDb.Close() // Release back to pool; we only needed to verify a connection could be established.
+	//// Use a single connection so db.Conn() returns the same connection used for Ping and the
+	//// pgAdmin query runs on the same connection that receives our multi-statement response.
+	//db.SetMaxOpenConns(1)
+	//db.SetConnMaxLifetime(0)
 
 	// Verifica se a conexão pode ser realmente estabelecida
 	// Isso é crítico porque sql.Open() não retorna erro se o servidor estiver inacessível
