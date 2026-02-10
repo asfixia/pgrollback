@@ -103,10 +103,26 @@ func (p *proxyConnection) SendCommandComplete(cmd string) {
 	p.backend.Send(&pgproto3.CommandComplete{CommandTag: []byte(tag)})
 }
 
-// SendReadyForQuery envia a mensagem ReadyForQuery ('I' = Idle) e força o flush.
-// Essencial para manter o protocolo sincronizado no fluxo de Query Simples.
+// ReadyForQueryTxStatus returns the transaction status byte for ReadyForQuery.
+// 'I' = idle, 'T' = in transaction. Used so libpq's PQtransactionStatus() (and thus PDO's
+// pdo_is_in_transaction()) matches the connection's user-transaction count. Exported for tests.
+func (p *proxyConnection) ReadyForQueryTxStatus() byte {
+	if p.GetUserOpenTransactionCount() > 0 {
+		return 'T'
+	}
+	return 'I'
+}
+
+// SendReadyForQuery sends a ReadyForQuery message and flushes.
+// The TxStatus byte drives libpq's PQtransactionStatus() and therefore PDO's
+// pdo_is_in_transaction() check. We send:
+//   - 'T' (in transaction) when the connection has open user transactions (userOpenTransactionCount > 0)
+//   - 'I' (idle)           when no user transaction is active
+//
+// This ensures PDO/libpq see the correct transaction state after BEGIN and COMMIT/ROLLBACK.
 func (p *proxyConnection) SendReadyForQuery() {
-	p.backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+	status := p.ReadyForQueryTxStatus()
+	p.backend.Send(&pgproto3.ReadyForQuery{TxStatus: status})
 	if err := p.backend.Flush(); err != nil {
 		log.Printf("[PROXY] Erro no flush do ReadyForQuery: %v", err)
 	}

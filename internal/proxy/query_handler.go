@@ -59,10 +59,22 @@ func (p *proxyConnection) ForwardCommandToDB(testID string, query string, sendRe
 	isTransactionControl := cmdType == "SAVEPOINT" || cmdType == "RELEASE" || cmdType == "ROLLBACK"
 
 	if isTransactionControl {
+		if IsUserBeginQuery(query) {
+			if err := session.DB.ClaimOpenTransaction(p.connectionID()); err != nil {
+				return err
+			}
+		}
 		tag, err = session.DB.SafeExecTCL(context.Background(), query, args...)
 		if err != nil {
+			if IsQueryThatAffectsClaim(query) {
+				session.DB.ReleaseOpenTransaction(p.connectionID())
+			}
 			log.Printf("[PROXY] Erro na execução transacional (TCL): %v", err)
 			err = fmt.Errorf("falha ao executar comando TCL: %w", err)
+			return err
+		}
+		// Apply all TCL side effects in one place: SavepointLevel, per-connection count, and release claim when count drops to 0.
+		if err := p.ApplyTCLSuccessTracking(query, session); err != nil {
 			return err
 		}
 	} else {
@@ -116,11 +128,6 @@ func (p *proxyConnection) ForwardMultipleCommandsToDB(testID string, commands []
 		return fmt.Errorf("sessão não encontrada para testID: '%s'", testID)
 	}
 
-	fullQuery := strings.Join(commands, "; ")
-	if !strings.HasSuffix(fullQuery, ";") {
-		fullQuery += ";"
-	}
-
 	pgConn := session.DB.PgConn()
 	if pgConn == nil {
 		return fmt.Errorf("sessão sem conexão para testID: '%s'", testID)
@@ -128,10 +135,24 @@ func (p *proxyConnection) ForwardMultipleCommandsToDB(testID string, commands []
 	if !session.DB.HasActiveTransaction() {
 		return fmt.Errorf("sessão existe mas sem transaction: '%s'", testID)
 	}
+
+	session.DB.LockRun()
+
+	fullQuery := strings.Join(commands, "; ")
+	if !strings.HasSuffix(fullQuery, ";") {
+		fullQuery += ";"
+	}
 	//mrr := pgConn.Exec(context.Background(), "savepoint ")
 
 	mrr := pgConn.Exec(context.Background(), fullQuery)
 	defer mrr.Close()
+
+	// When we run our synthetic ROLLBACK (ROLLBACK TO SAVEPOINT; RELEASE SAVEPOINT), the client
+	// sent a single "ROLLBACK" and expects a single CommandComplete("ROLLBACK") + ReadyForQuery.
+	// We must not send two CommandComplete tags or the driver can hang.
+	isRollbackPair := len(commands) == 2 &&
+		strings.Contains(strings.ToUpper(strings.TrimSpace(commands[0])), "ROLLBACK TO SAVEPOINT ") &&
+		strings.Contains(strings.ToUpper(strings.TrimSpace(commands[1])), "RELEASE SAVEPOINT ")
 
 	var lastSelectResult *pgproto3.RowDescription
 	var lastSelectRows []*pgproto3.DataRow
@@ -169,6 +190,7 @@ func (p *proxyConnection) ForwardMultipleCommandsToDB(testID string, commands []
 
 			tag, err := rr.Close()
 			if err != nil {
+				session.DB.UnlockRun()
 				return fmt.Errorf("erro ao fechar result reader: %w", err)
 			}
 
@@ -179,13 +201,16 @@ func (p *proxyConnection) ForwardMultipleCommandsToDB(testID string, commands []
 			}
 		} else {
 			// Comando sem retorno de linhas (UPDATE, INSERT, SET, etc).
-			// Envia o CommandComplete imediatamente.
 			tag, err := rr.Close()
 			if err != nil {
+				session.DB.UnlockRun()
 				return fmt.Errorf("erro ao fechar result reader: %w", err)
 			}
-			if tagStr := tag.String(); tagStr != "" {
-				p.backend.Send(&pgproto3.CommandComplete{CommandTag: []byte(tagStr)})
+			// For our rollback pair, do not send per-command tags; we send a single "ROLLBACK" below.
+			if !isRollbackPair {
+				if tagStr := tag.String(); tagStr != "" {
+					p.backend.Send(&pgproto3.CommandComplete{CommandTag: []byte(tagStr)})
+				}
 			}
 		}
 	}
@@ -197,10 +222,24 @@ func (p *proxyConnection) ForwardMultipleCommandsToDB(testID string, commands []
 			p.backend.Send(row)
 		}
 		p.backend.Send(&pgproto3.CommandComplete{CommandTag: lastSelectTag})
+	} else if isRollbackPair {
+		// Client sent one ROLLBACK; respond with one CommandComplete.
+		p.backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("ROLLBACK")})
 	}
 
 	if err := mrr.Close(); err != nil {
+		session.DB.UnlockRun()
 		return fmt.Errorf("erro ao processar múltiplos resultados: %w", err)
+	}
+
+	// Release run lock before TCL tracking: ApplyTCLSuccessTracking calls DecrementSavepointLevel etc., which take session.DB.mu.
+	session.DB.UnlockRun()
+
+	// Apply TCL side effects (e.g. ROLLBACK ...; RELEASE ... from handleRollback) so session level stays in sync.
+	for _, cmd := range commands {
+		if trimmed := strings.TrimSpace(cmd); trimmed != "" {
+			_ = p.ApplyTCLSuccessTracking(trimmed, session)
+		}
 	}
 
 	if err := p.backend.Flush(); err != nil {
@@ -212,27 +251,6 @@ func (p *proxyConnection) ForwardMultipleCommandsToDB(testID string, commands []
 	}
 	return nil
 }
-
-//func (p *proxyConnection) ExecuteSelectQueryFromPreparedStatement(testID string, preparedStatement string, sendReadyForQuery bool) (pgx.Rows, error) {
-//	session := p.server.Pgtest.GetSession(testID)
-//	if session == nil {
-//		return nil, fmt.Errorf("sessão não encontrada para testID: %s", testID)
-//	}
-//
-//	query := fmt.Sprintf(`
-//		SELECT
-//			statement
-//		FROM pg_prepared_statements
-//		WHERE name = '%s';
-//		`, preparedStatement)
-//	uqSavepointID := fmt.Sprintf("pgtest_exec_guard_%s", rand.Int31())
-//	rows, err := SafeQuery(context.Background(), session.DB, uqSavepointID, query)
-//	//if err != nil {
-//	//	return err
-//	//}
-//	//return p.ExecuteSelectQuery(tag.String(), sendReadyForQuery)
-//	return rows, err
-//}
 
 // ExecuteSelectQuery executa um SELECT e envia os resultados. args são parâmetros (Extended Query); opcional.
 func (p *proxyConnection) ExecuteSelectQuery(testID string, query string, sendReadyForQuery bool, args ...any) error {

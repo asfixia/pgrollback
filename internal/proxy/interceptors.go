@@ -12,8 +12,9 @@ const (
 	FULLROLLBACK_SENTINEL = "-- fullrollback" // "pgtest rollback" response: single CommandComplete+ReadyForQuery, no DB
 )
 
-// InterceptQuery intercepta e modifica queries específicas antes da execução
-func (p *PGTest) InterceptQuery(testID string, query string) (string, error) {
+// InterceptQuery intercepta e modifica queries específicas antes da execução.
+// connID is the connection making the request; pass 0 when there is no connection (e.g. tests). When connID != 0, BEGIN fails if another connection already has an open transaction.
+func (p *PGTest) InterceptQuery(testID string, query string, connID ConnectionID) (string, error) {
 	queryTrimmed := strings.TrimSpace(query)
 	queryUpper := strings.ToUpper(queryTrimmed)
 
@@ -22,7 +23,7 @@ func (p *PGTest) InterceptQuery(testID string, query string) (string, error) {
 	}
 
 	if strings.HasPrefix(queryUpper, "BEGIN") {
-		return p.handleBegin(testID)
+		return p.handleBegin(testID, connID)
 	}
 
 	if strings.HasPrefix(queryUpper, "COMMIT") {
@@ -79,18 +80,19 @@ func (p *PGTest) handlePGTestCommand(testID string, query string) (string, error
 // - Cada BEGIN cria um novo savepoint, permitindo rollback aninhado
 // - O primeiro BEGIN (SavepointLevel = 0) marca o "ponto de início" desta conexão/cliente
 // - Savepoints subsequentes permitem rollback parcial dentro da mesma conexão
+// - When connID != 0, BEGIN fails with ErrOnlyOneTransactionAtATime if connectionWithOpenTx is another connection.
 //
 // Caso de uso PHP:
 // - PHP conecta → executa BEGIN → cria savepoint pgtest_v_1 (ponto de início)
 // - PHP faz comandos → executa BEGIN novamente → cria savepoint pgtest_v_2
 // - PHP executa ROLLBACK → faz rollback até pgtest_v_2 (não afeta pgtest_v_1)
 // - PHP desconecta → próxima conexão PHP com mesmo testID pode continuar de onde parou
-func (p *PGTest) handleBegin(testID string) (string, error) {
+func (p *PGTest) handleBegin(testID string, connID ConnectionID) (string, error) {
 	session := p.GetSession(testID)
 	if session == nil {
 		return "", fmt.Errorf("Session not found '%s'", testID)
 	}
-	return session.handleBegin(testID)
+	return session.handleBegin(testID, connID)
 }
 
 // handleCommit converte COMMIT em RELEASE SAVEPOINT

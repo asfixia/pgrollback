@@ -3,6 +3,7 @@ package tstproxy
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"pgtest-transient/internal/proxy"
@@ -123,10 +124,31 @@ func assertTableExists(t *testing.T, session *proxy.TestSession, tableName strin
 	}
 }
 
-// execBeginAndVerify executa BEGIN através do interceptor e verifica o nível de savepoint.
+// testConnectionID is used by flow helpers when applying BEGIN/COMMIT/ROLLBACK side effects (no real proxy connection).
+const testConnectionID = 1
+
+// applyBeginSuccess applies session side effects after a SAVEPOINT (user BEGIN) has been executed. Test-only helper.
+func applyBeginSuccess(session *proxy.TestSession, connID uintptr) error {
+	if err := session.DB.ClaimOpenTransaction(proxy.ConnectionID(connID)); err != nil {
+		return err
+	}
+	session.DB.IncrementSavepointLevel()
+	return nil
+}
+
+// applyCommitOrRollbackSuccess applies session side effects after RELEASE SAVEPOINT or ROLLBACK TO SAVEPOINT. Test-only helper.
+func applyCommitOrRollbackSuccess(session *proxy.TestSession, connID uintptr) {
+	session.DB.DecrementSavepointLevel()
+	if session.DB.GetSavepointLevel() == 0 {
+		session.DB.ReleaseOpenTransaction(proxy.ConnectionID(connID))
+	}
+}
+
+// execBeginAndVerify executa BEGIN através do interceptor. Se o interceptor retornar SAVEPOINT, aplica
+// os efeitos (claim + nível). Se retornar DEFAULT_SELECT_ONE (no-op, single level), apenas executa e verifica que o nível não mudou.
 func execBeginAndVerify(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, expectedLevel int, contextMsg string) {
 	t.Helper()
-	query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "BEGIN")
+	query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "BEGIN", testConnectionID)
 	if err != nil {
 		msg := "InterceptQuery(BEGIN) error"
 		if contextMsg != "" {
@@ -145,19 +167,28 @@ func execBeginAndVerify(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestS
 		}
 		t.Fatalf("%s: %v", msg, err)
 	}
+	if query != proxy.DEFAULT_SELECT_ONE {
+		if err := applyBeginSuccess(session, testConnectionID); err != nil {
+			msg := "applyBeginSuccess error"
+			if contextMsg != "" {
+				msg = fmt.Sprintf("%s (%s)", msg, contextMsg)
+			}
+			t.Fatalf("%s: %v", msg, err)
+		}
+	}
 	if session.DB.GetSavepointLevel() != expectedLevel {
 		msg := fmt.Sprintf("SavepointLevel after BEGIN = %v, want %d", session.DB.GetSavepointLevel(), expectedLevel)
 		if contextMsg != "" {
 			msg = fmt.Sprintf("%s (%s)", msg, contextMsg)
 		}
-		t.Errorf("%s", msg)
+		t.Fatalf("%s", msg)
 	}
 }
 
-// execCommitOnLevel executa COMMIT através do interceptor e verifica o nível de savepoint.
+// execCommitOnLevel executa COMMIT através do interceptor, aplica os efeitos (DecrementSavepointLevel/Release) e verifica o nível de savepoint.
 func execCommitOnLevel(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, expectedLevel int, contextMsg string) {
 	t.Helper()
-	query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "COMMIT")
+	query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "COMMIT", 0)
 	if err != nil {
 		msg := "InterceptQuery(COMMIT) error"
 		if contextMsg != "" {
@@ -176,6 +207,9 @@ func execCommitOnLevel(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSe
 		}
 		t.Fatalf("%s: %v", msg, err)
 	}
+	if strings.Contains(query, "RELEASE SAVEPOINT") {
+		applyCommitOrRollbackSuccess(session, testConnectionID)
+	}
 	if session.DB.GetSavepointLevel() != expectedLevel {
 		msg := fmt.Sprintf("SavepointLevel after COMMIT = %v, want %d", session.DB.GetSavepointLevel(), expectedLevel)
 		if contextMsg != "" {
@@ -185,10 +219,10 @@ func execCommitOnLevel(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSe
 	}
 }
 
-// execRollbackAndVerify executa ROLLBACK através do interceptor e verifica o nível de savepoint.
+// execRollbackAndVerify executa ROLLBACK através do interceptor, aplica os efeitos (DecrementSavepointLevel/Release) e verifica o nível de savepoint.
 func execRollbackAndVerify(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, expectedLevel int, contextMsg string) {
 	t.Helper()
-	query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "ROLLBACK")
+	query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "ROLLBACK", 0)
 	if err != nil {
 		msg := "InterceptQuery(ROLLBACK) error"
 		if contextMsg != "" {
@@ -207,6 +241,9 @@ func execRollbackAndVerify(t *testing.T, pgtest *proxy.PGTest, session *proxy.Te
 		}
 		t.Fatalf("%s: %v", msg, err)
 	}
+	if strings.Contains(query, "ROLLBACK TO SAVEPOINT") {
+		applyCommitOrRollbackSuccess(session, testConnectionID)
+	}
 	if session.DB.GetSavepointLevel() != expectedLevel {
 		msg := fmt.Sprintf("SavepointLevel after ROLLBACK = %v, want %d", session.DB.GetSavepointLevel(), expectedLevel)
 		if contextMsg != "" {
@@ -219,7 +256,7 @@ func execRollbackAndVerify(t *testing.T, pgtest *proxy.PGTest, session *proxy.Te
 // assertCommitBlocked verifica que COMMIT está bloqueado
 func assertCommitBlocked(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, contextMsg string) {
 	t.Helper()
-	query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "COMMIT")
+	query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "COMMIT", 0)
 	if err != nil {
 		msg := "InterceptQuery(COMMIT) error"
 		if contextMsg != "" {
@@ -239,7 +276,7 @@ func assertCommitBlocked(t *testing.T, pgtest *proxy.PGTest, session *proxy.Test
 // assertRollbackBlocked verifica que ROLLBACK está bloqueado
 func assertRollbackBlocked(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, contextMsg string) {
 	t.Helper()
-	query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "ROLLBACK")
+	query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "ROLLBACK", 0)
 	if err != nil {
 		msg := "InterceptQuery(ROLLBACK) error"
 		if contextMsg != "" {

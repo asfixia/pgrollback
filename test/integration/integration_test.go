@@ -566,8 +566,9 @@ func TestInvalidStatements(t *testing.T) {
 	execPgtestRollback(t, pgtestDB)
 }
 
-// TestIsolatedRollbackPerBegin valida que cada ROLLBACK afeta apenas os statements
-// desde o último BEGIN que não teve COMMIT
+// TestIsolatedRollbackPerBegin valida COMMIT/ROLLBACK com regras de um único nível:
+// - Apenas o primeiro BEGIN cria savepoint; BEGINs seguintes são no-op (não dão erro).
+// - Apenas o primeiro COMMIT ou ROLLBACK após BEGIN é "real"; com level 0, COMMIT/ROLLBACK são no-op.
 func TestIsolatedRollbackPerBegin(t *testing.T) {
 	testID := "test_isolated_rollback"
 	pgtestProxyDSN := getPGTestProxyDSN(testID)
@@ -581,43 +582,26 @@ func TestIsolatedRollbackPerBegin(t *testing.T) {
 	schema := getTestSchema()
 	tableName := postgres.QuoteQualifiedName(schema, "pgtest_isolated_rollback")
 
-	// Verifica que a tabela não existe antes de criar
 	assertTableDoesNotExist(t, pgtestDB, tableName, "Table should not exist before test")
-
-	// Cria tabela
 	createTableWithValueColumn(t, pgtestDB, tableName)
 
-	// Teste 1: BEGIN → INSERT → BEGIN → INSERT → ROLLBACK
-	// O ROLLBACK deve reverter apenas o segundo INSERT
+	// Teste 1: BEGIN → INSERT → BEGIN (no-op) → INSERT → ROLLBACK
+	// Com um único nível, ROLLBACK reverte tudo desde o único savepoint (ambos INSERTs).
 	t.Run("rollback_reverts_only_last_begin", func(t *testing.T) {
-		// Primeiro BEGIN
 		execBegin(t, pgtestDB, "")
-
-		// Primeiro INSERT
 		insertOneRow(t, pgtestDB, tableName, "first_insert", "insert first value in rollback_reverts_only_last_begin test")
-
-		// Segundo BEGIN (cria novo savepoint)
-		execBegin(t, pgtestDB, "")
-
-		// Segundo INSERT
+		execBegin(t, pgtestDB, "") // no-op: single level
 		insertOneRow(t, pgtestDB, tableName, "second_insert", "insert second value in rollback_reverts_only_last_begin test")
 
-		// ROLLBACK deve reverter apenas o segundo INSERT
 		execRollbackOrFail(t, pgtestDB)
 
-		// Verifica que apenas o primeiro INSERT existe
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'first_insert'", tableName), 1, "First INSERT should still exist")
+		// Single level: rollback reverts to the only savepoint, so both inserts are gone.
+		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'first_insert'", tableName), 0, "First INSERT should be rolled back (single level)")
 		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'second_insert'", tableName), 0, "Second INSERT should be rolled back")
 
-		// COMMIT do primeiro BEGIN
-		execCommit(t, pgtestDB)
-		//O rollback nao deve fazer nada
-		// #Danilo só deve permitir remover os savepoints da conexão atual. (Adicionar teste pra isso)
-		//execRollbackOrFail(t, pgtestDB)
-
-		// Verifica que o primeiro INSERT ainda existe após COMMIT
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'first_insert'", tableName), 1, "First INSERT should still exist after COMMIT")
-		t.Log("OPA")
+		execCommit(t, pgtestDB) // real: releases the savepoint
+		// Second COMMIT/ROLLBACK would be no-op (level 0)
+		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'first_insert'", tableName), 0, "Still 0 after COMMIT")
 	})
 
 	// Teste 2: BEGIN → INSERT → COMMIT → BEGIN → INSERT → ROLLBACK
@@ -656,39 +640,27 @@ func TestIsolatedRollbackPerBegin(t *testing.T) {
 		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'uncommitted_insert'", tableName), 0, "Uncommitted INSERT should be rolled back")
 	})
 
-	// Teste 3: Múltiplos níveis aninhados
-	// BEGIN → INSERT → BEGIN → INSERT → BEGIN → INSERT → ROLLBACK → ROLLBACK
-	// Cada ROLLBACK deve reverter apenas até o último BEGIN
+	// Teste 3: Um único nível — BEGIN → INSERTs → ROLLBACK reverte tudo desde o savepoint
+	// Segundo BEGIN é no-op; segundo ROLLBACK é no-op (level 0).
 	t.Run("nested_begin_rollback_levels", func(t *testing.T) {
-		// Primeiro nível
 		execBegin(t, pgtestDB, "")
-		insertOneRow(t, pgtestDB, tableName, "level1", "insert level 1 in nested_begin_rollback_levels test")
-
-		// Segundo nível
-		execBegin(t, pgtestDB, "")
-		insertOneRow(t, pgtestDB, tableName, "level2", "insert level 2 in nested_begin_rollback_levels test")
-
-		// Terceiro nível
+		insertOneRow(t, pgtestDB, tableName, "level1", "insert level 1")
+		execBegin(t, pgtestDB, "") // no-op
+		insertOneRow(t, pgtestDB, tableName, "level2", "insert level 2")
 		_, err = pgtestDB.Exec("BEGIN")
 		if err != nil {
-			t.Fatalf("Failed to execute BEGIN level 3: %v", err)
+			t.Fatalf("Failed to execute BEGIN: %v", err)
 		}
-		insertOneRow(t, pgtestDB, tableName, "level3", "insert level 3 in nested_begin_rollback_levels test")
+		insertOneRow(t, pgtestDB, tableName, "level3", "insert level 3")
 
-		// Primeiro ROLLBACK - deve reverter apenas level3
-		execRollbackOrFail(t, pgtestDB)
+		execRollbackOrFail(t, pgtestDB) // real: reverts to only savepoint, so level1/2/3 all gone
 		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'level3'", tableName), 0, "Level 3 should be rolled back")
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'level2'", tableName), 1, "Level 2 should still exist")
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'level1'", tableName), 1, "Level 1 should still exist")
+		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'level2'", tableName), 0, "Level 2 should be rolled back (single level)")
+		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'level1'", tableName), 0, "Level 1 should be rolled back (single level)")
 
-		// Segundo ROLLBACK - deve reverter apenas level2
-		execRollbackOrFail(t, pgtestDB)
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'level2'", tableName), 0, "Level 2 should be rolled back")
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'level1'", tableName), 1, "Level 1 should still exist")
-
-		// COMMIT do primeiro nível
-		execCommit(t, pgtestDB)
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'level1'", tableName), 1, "Level 1 should still exist after COMMIT")
+		execRollbackOrFail(t, pgtestDB) // no-op (level 0)
+		execCommit(t, pgtestDB)         // real
+		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'level1'", tableName), 0, "Level 1 still 0 after COMMIT")
 	})
 
 	// Teste 4: BEGIN → INSERT → COMMIT → BEGIN → INSERT → COMMIT → BEGIN → INSERT → ROLLBACK

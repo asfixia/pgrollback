@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"math/rand"
 	"strconv"
 )
@@ -33,21 +34,29 @@ func NewTestSessionForTesting(pgtest *PGTest) *TestSession {
 	return session
 }
 
-// NewTestSessionWithLevel cria uma instância TestSession com nível de savepoint específico para testes
-// Esta função é exportada para permitir que testes em outros packages a usem
-func NewTestSessionWithLevel(pgtest *PGTest, testID string, savepointQuantity int) *TestSession {
-	if savepointQuantity < 0 {
-		return nil
-	}
+// testSetupConnectionID is used by NewTestSessionWithLevel when applying BEGIN side effects (no real proxy connection).
+const testSetupConnectionID ConnectionID = 0
+
+// NewTestSessionWithLevel cria uma instância TestSession com nível de savepoint 1 para testes.
+// Executa um BEGIN (SAVEPOINT) e aplica claim + incremento de nível.
+func NewTestSessionWithLevel(pgtest *PGTest, testID string) *TestSession {
 	session, err := pgtest.GetOrCreateSession(testID)
 	if err != nil {
 		return nil
 	}
-	for i := 0; i < savepointQuantity; i++ {
-		_, err := pgtest.handleBegin(testID)
-		if err != nil {
-			return nil
-		}
+	if session.DB == nil || !session.DB.HasActiveTransaction() {
+		return nil
 	}
+	q, err := pgtest.handleBegin(testID, testSetupConnectionID)
+	if err != nil {
+		return nil
+	}
+	if _, err := session.DB.Tx().Exec(context.Background(), q); err != nil {
+		return nil
+	}
+	if err := session.DB.ClaimOpenTransaction(testSetupConnectionID); err != nil {
+		return nil
+	}
+	session.DB.IncrementSavepointLevel()
 	return session
 }

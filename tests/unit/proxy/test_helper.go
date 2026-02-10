@@ -268,8 +268,8 @@ func newTestSession(pgtest *proxy.PGTest) *proxy.TestSession {
 	return proxy.NewTestSessionForTesting(pgtest)
 }
 
-func newTestSessionWithLevel(pgtest *proxy.PGTest, testID string, savepointQuantity int) *proxy.TestSession {
-	return proxy.NewTestSessionWithLevel(pgtest, testID, savepointQuantity)
+func newTestSessionWithLevel(pgtest *proxy.PGTest, testID string) *proxy.TestSession {
+	return proxy.NewTestSessionWithLevel(pgtest, testID)
 }
 
 func contains(s, substr string) bool {

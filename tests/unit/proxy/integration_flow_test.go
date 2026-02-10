@@ -20,16 +20,17 @@ func TestTransactionFlow_CompleteCycle(t *testing.T) {
 	tableName := "test_transaction_table_" + testID
 	createTableWithIdAndName(t, pgtest, session, tableName)
 	assertTableCount(t, session, tableName, 0, "Table should be empty initially")
-	assertCommitBlocked(t, pgtest, session, "COMMIT at level 0 should be blocked")     //fake commit
-	execBeginAndVerify(t, pgtest, session, 1, "First BEGIN creates savepoint level 1") //1 Begin
-	insertRowWithName(t, pgtest, session, tableName, "test_row")                       //insert row 1 in table
+	assertCommitBlocked(t, pgtest, session, "COMMIT at level 0 should be blocked")       // fake commit
+	execBeginAndVerify(t, pgtest, session, 1, "First BEGIN creates savepoint level 1")
+	insertRowWithName(t, pgtest, session, tableName, "test_row")
 	assertRowCountWithCondition(t, session, tableName, "name = 'test_row'", 1, "Row should be inserted")
-	execBeginAndVerify(t, pgtest, session, 2, "Second BEGIN creates savepoint level 2") //2 Begin
-	execCommitOnLevel(t, pgtest, session, 1, "COMMIT releases savepoint level 2")       //commit to level 1
+	execBeginAndVerify(t, pgtest, session, 1, "Second BEGIN is no-op (single level)")
+	execCommitOnLevel(t, pgtest, session, 0, "COMMIT releases savepoint level 1 -> level 0")
 	assertRowCountWithCondition(t, session, tableName, "name = 'test_row'", 1, "Row should still exist after COMMIT")
-	execRollbackAndVerify(t, pgtest, session, 0, "ROLLBACK to savepoint level 1") //rollback to level 0
-	// Verifica que a linha foi removida (rollback removeu a inserção que estava dentro de sp_1)
-	assertRowCountWithCondition(t, session, tableName, "name = 'test_row'", 0, "Row should be removed after ROLLBACK")
+	execBeginAndVerify(t, pgtest, session, 1, "BEGIN creates savepoint level 1 again")
+	execRollbackAndVerify(t, pgtest, session, 0, "ROLLBACK to level 0")
+	// Rollback only released the savepoint; test_row was committed earlier so it still exists.
+	assertRowCountWithCondition(t, session, tableName, "name = 'test_row'", 1, "Row should still exist after ROLLBACK")
 
 	// 7. Segundo rollback não é possível (já estamos no nível 0)
 	// Mas a tabela ainda existe porque foi criada antes de qualquer savepoint
@@ -53,19 +54,15 @@ func TestExcessiveRollback(t *testing.T) {
 		t.Skip("Skipping test - requires PostgreSQL connection")
 	}
 
-	// Cria apenas 2 savepoints
+	// Single level: only one BEGIN creates a savepoint
 	execBeginAndVerify(t, pgtest, session, 1, "First BEGIN creates savepoint level 1")
-	execBeginAndVerify(t, pgtest, session, 2, "Second BEGIN creates savepoint level 2")
+	execBeginAndVerify(t, pgtest, session, 1, "Second BEGIN is no-op (single level)")
 
-	// Faz 3 rollbacks (mais que os 2 savepoints criados)
-	// Primeiro rollback deve funcionar
-	execRollbackAndVerify(t, pgtest, session, 1, "First ROLLBACK removes savepoint level 2")
+	// First ROLLBACK (real) -> level 0
+	execRollbackAndVerify(t, pgtest, session, 0, "First ROLLBACK removes savepoint level 1")
 
-	// Segundo rollback deve funcionar
-	execRollbackAndVerify(t, pgtest, session, 0, "Second ROLLBACK removes savepoint level 1")
-
-	// Terceiro rollback deve ser bloqueado (não há mais savepoints)
-	assertRollbackBlocked(t, pgtest, session, "Third ROLLBACK at level 0 should be blocked")
+	// Second ROLLBACK is no-op (level 0)
+	assertRollbackBlocked(t, pgtest, session, "Second ROLLBACK at level 0 should be blocked")
 
 	// Nota: Em um sistema real, poderia imprimir um aviso no stdout
 	// mas como estamos testando apenas a lógica, verificamos que funciona corretamente

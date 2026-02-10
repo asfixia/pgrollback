@@ -349,13 +349,13 @@ func (p *PGTest) ExecuteWithLock(session *TestSession, query string) error {
 // - PHP faz comandos → executa BEGIN novamente → cria savepoint pgtest_v_2
 // - PHP executa ROLLBACK → faz rollback até pgtest_v_2 (não afeta pgtest_v_1)
 // - PHP desconecta → próxima conexão PHP com mesmo testID pode continuar de onde parou
-func (s *TestSession) handleBegin(testID string) (string, error) {
+func (s *TestSession) handleBegin(testID string, connID ConnectionID) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.DB == nil {
 		return "", fmt.Errorf("Begin TestSession has no connection to DB on ID: %s", testID)
 	}
-	return s.DB.handleBegin(testID)
+	return s.DB.handleBegin(testID, connID)
 }
 
 // handleCommit converte COMMIT em RELEASE SAVEPOINT

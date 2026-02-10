@@ -13,6 +13,13 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+// ConnectionID is an opaque identifier for a proxy connection, used to allow
+// nested BEGIN (same connection) while rejecting BEGIN from a different connection.
+type ConnectionID = uintptr
+
+// ErrOnlyOneTransactionAtATime is returned when a second connection tries to BEGIN while another already has an open user transaction on the same session.
+var ErrOnlyOneTransactionAtATime = errors.New("only one transaction could start a transaction at a time on our pgtest")
+
 // realSessionDB encapsulates the PostgreSQL connection and its active transaction.
 // - The connection (conn) is only used for transaction control: Begin, Rollback base, Close, keepalive, advisory lock.
 // - All data operations (Query, Exec) go through the transaction so commands are never run outside the transaction.
@@ -20,18 +27,19 @@ import (
 // Callers use Query/Exec; the abstraction ensures the right object (tx) is used.
 // You cannot "get the transaction from Conn" in pgx—Conn.Begin() returns a Tx, so both are stored and managed here.
 type realSessionDB struct {
-	conn                *pgx.Conn
-	tx                  pgx.Tx
-	mu                  sync.RWMutex
-	SavepointLevel      int
-	stopKeepalive       func()
-	lastQuery           string
-	preparedStatements  map[string]string                       // statement name -> intercepted query (Extended Query); always non-nil (set in newSessionDB)
-	statementDescs      map[string]*pgconn.StatementDescription // statement name -> cached description from Prepare(); may be nil entry
-	portalToStatement   map[string]string                       // portal name -> statement name (Extended Query); always non-nil (set in newSessionDB)
-	portalParams        map[string][][]byte                     // portal name -> bound parameter values (from Bind); always non-nil
-	portalFormatCodes   map[string][]int16                      // portal name -> ParameterFormatCodes (0=text, 1=binary)
-	portalResultFormats map[string][]int16                      // portal name -> ResultFormatCodes (from Bind)
+	conn                   *pgx.Conn
+	tx                     pgx.Tx
+	mu                     sync.RWMutex // state + serializes SQL execution (Lock for SafeExec/SafeQuery/SafeExecTCL and PgConn().Exec)
+	SavepointLevel       int
+	connectionWithOpenTx ConnectionID // which connection has the transaction; 0 when none
+	stopKeepalive        func()
+	lastQuery              string
+	preparedStatements     map[string]string                       // statement name -> intercepted query (Extended Query); always non-nil (set in newSessionDB)
+	statementDescs         map[string]*pgconn.StatementDescription // statement name -> cached description from Prepare(); may be nil entry
+	portalToStatement      map[string]string                       // portal name -> statement name (Extended Query); always non-nil (set in newSessionDB)
+	portalParams           map[string][][]byte                     // portal name -> bound parameter values (from Bind); always non-nil
+	portalFormatCodes      map[string][]int16                      // portal name -> ParameterFormatCodes (0=text, 1=binary)
+	portalResultFormats    map[string][]int16                      // portal name -> ResultFormatCodes (from Bind)
 }
 
 func (d *realSessionDB) GetSavepointLevel() int {
@@ -40,8 +48,97 @@ func (d *realSessionDB) GetSavepointLevel() int {
 	return d.SavepointLevel
 }
 
+// GetSavepointName returns the name for the current savepoint level. Caller must hold d.mu when level may be changing.
 func (d *realSessionDB) GetSavepointName() string {
 	return fmt.Sprintf("pgtest_v_%d", d.SavepointLevel)
+}
+
+// GetNextSavepointName returns the name for the next SAVEPOINT (current level + 1) without incrementing.
+// Used by the interceptor so SavepointLevel is only incremented when the SAVEPOINT is actually executed.
+func (d *realSessionDB) GetNextSavepointName() string {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return fmt.Sprintf("pgtest_v_%d", d.SavepointLevel+1)
+}
+
+// IncrementSavepointLevel increments the savepoint level. Call only after a SAVEPOINT has been successfully executed.
+func (d *realSessionDB) IncrementSavepointLevel() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.SavepointLevel++
+}
+
+// DecrementSavepointLevel decrements the savepoint level. Call only after a RELEASE SAVEPOINT or ROLLBACK TO SAVEPOINT has been successfully executed. No-op if level is already 0.
+func (d *realSessionDB) DecrementSavepointLevel() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.SavepointLevel > 0 {
+		d.SavepointLevel--
+	}
+}
+
+// LockRun holds d.mu for the duration of using the backend outside SafeExec/SafeQuery/SafeExecTCL (e.g. PgConn().Exec). Unlock with UnlockRun.
+func (d *realSessionDB) LockRun() {
+	d.mu.Lock()
+}
+
+// UnlockRun releases d.mu held by LockRun.
+func (d *realSessionDB) UnlockRun() {
+	d.mu.Unlock()
+}
+
+// hasOpenUserTransaction returns true when any connection has an open user transaction.
+// Caller must hold d.mu.
+func (d *realSessionDB) hasOpenUserTransaction() bool {
+	return d.connectionWithOpenTx != 0
+}
+
+// isTransactionHeldByOtherConnection returns true when a connection other than connID has the open transaction.
+// Caller must hold d.mu.
+func (d *realSessionDB) isTransactionHeldByOtherConnection(connID ConnectionID) bool {
+	return d.hasOpenUserTransaction() && d.connectionWithOpenTx != connID
+}
+
+// IsUserBeginQuery returns true when the query is a user BEGIN (SAVEPOINT pgtest_v_*).
+// Callers use this to decide whether to call ClaimOpenTransaction (e.g. before executing TCL).
+func IsUserBeginQuery(query string) bool {
+	return strings.HasPrefix(strings.TrimSpace(query), "SAVEPOINT pgtest_v_")
+}
+
+// isUserReleaseQuery returns true when the query is a user COMMIT (RELEASE SAVEPOINT pgtest_v_*).
+func isUserReleaseQuery(query string) bool {
+	return strings.HasPrefix(strings.TrimSpace(query), "RELEASE SAVEPOINT pgtest_v_")
+}
+
+// IsQueryThatAffectsClaim returns true when the query is one that claimed (BEGIN) or that would release (COMMIT).
+// Callers use this to decide whether to call ReleaseOpenTransaction (e.g. on TCL failure).
+func IsQueryThatAffectsClaim(query string) bool {
+	return IsUserBeginQuery(query) || isUserReleaseQuery(query)
+}
+
+// ClaimOpenTransaction records that the given connection is starting a user transaction (BEGIN).
+// Call only when the query is a user BEGIN (e.g. when IsUserBeginQuery(query) or when applying side effects after executing SAVEPOINT in tests).
+// Nested BEGIN on the same connection is allowed; returns ErrOnlyOneTransactionAtATime only
+// when a different connection already has an open transaction.
+func (d *realSessionDB) ClaimOpenTransaction(connID ConnectionID) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.isTransactionHeldByOtherConnection(connID) {
+		return ErrOnlyOneTransactionAtATime
+	}
+	d.connectionWithOpenTx = connID
+	return nil
+}
+
+// ReleaseOpenTransaction clears the "one connection has open transaction" flag when the
+// given connection is the one that had the claim. Call only when the claim should be released
+// (e.g. on disconnect, or when level drops to 0 after COMMIT/ROLLBACK, or on TCL failure when IsQueryThatAffectsClaim(query)).
+func (d *realSessionDB) ReleaseOpenTransaction(connID ConnectionID) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.connectionWithOpenTx == connID {
+		d.connectionWithOpenTx = 0
+	}
 }
 
 // SetPreparedStatement stores the intercepted query for the given statement name (Extended Query).
@@ -196,10 +293,8 @@ func (d *realSessionDB) handleRollback(testID string) (string, error) {
 
 	if d.SavepointLevel > 0 {
 		savepointName := d.GetSavepointName()
-		d.SavepointLevel--
-
+		// Do not decrement here; level is decremented only when the command is successfully executed (in ApplyTCLSuccessTracking).
 		// Faz rollback até o savepoint e depois o remove (RELEASE)
-		// Isso reverte todas as mudanças feitas após este savepoint
 		return fmt.Sprintf("ROLLBACK TO SAVEPOINT %s; RELEASE SAVEPOINT %s", savepointName, savepointName), nil
 	}
 
@@ -237,17 +332,26 @@ func (d *realSessionDB) handleCommit(testID string) (string, error) {
 
 	if d.SavepointLevel > 0 {
 		savepointName := d.GetSavepointName()
-		d.SavepointLevel--
+		// Do not decrement here; level is decremented only when the command is successfully executed (in ApplyTCLSuccessTracking).
 		return fmt.Sprintf("RELEASE SAVEPOINT %s", savepointName), nil
 	}
 
 	return DEFAULT_SELECT_ONE, nil
 }
 
-func (d *realSessionDB) handleBegin(testID string) (string, error) {
-
+func (d *realSessionDB) handleBegin(testID string, connID ConnectionID) (string, error) {
 	if !d.HasActiveTransaction() {
 		return "", fmt.Errorf("no active transaction: use BeginTx first")
+	}
+
+	// When connID is set (proxy path), fail if another connection already has an open user transaction.
+	if connID != 0 {
+		d.mu.Lock()
+		heldByOther := d.isTransactionHeldByOtherConnection(connID)
+		d.mu.Unlock()
+		if heldByOther {
+			return "", ErrOnlyOneTransactionAtATime
+		}
 	}
 
 	// Garantia de segurança: se não houver transação base, cria uma primeiro
@@ -257,13 +361,14 @@ func (d *realSessionDB) handleBegin(testID string) (string, error) {
 		return "", fmt.Errorf("Failed to Begin a transaction: %w", err)
 	}
 
-	d.mu.Lock()
-	// Cada BEGIN cria um novo savepoint, permitindo rollback aninhado
-	// Usa prefixo "pgtest_v_" para garantir que não conflite com savepoints criados pelo usuário
-	d.SavepointLevel++
-	d.mu.Unlock()
-
-	return fmt.Sprintf("SAVEPOINT %s", d.GetSavepointName()), nil
+	// Single logical level: only the first BEGIN creates a savepoint. Further BEGINs are no-ops (no error).
+	// COMMIT/ROLLBACK when level > 0 are "real"; when level is 0 they return success without doing anything.
+	if d.SavepointLevel >= 1 {
+		return DEFAULT_SELECT_ONE, nil
+	}
+	// Return the next savepoint name without incrementing; level is incremented only when the SAVEPOINT is successfully executed (in query_handler).
+	name := d.GetNextSavepointName()
+	return fmt.Sprintf("SAVEPOINT %s", name), nil
 }
 
 // Exec runs a command in the current transaction. Returns an error if there is no active transaction.
@@ -290,8 +395,8 @@ func commitSavePoint(ctx context.Context, savepoint pgx.Tx) {
 }
 
 func (d *realSessionDB) SafeQuery(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	savePoint, err := d.tx.Begin(ctx)
 	if err != nil || savePoint == nil {
 		return nil, fmt.Errorf("Falha ao iniciar savepoint de guarda: %w, sql: '''%s'''", err, sql)
@@ -322,8 +427,8 @@ func (d *realSessionDB) SafeQuery(ctx context.Context, sql string, args ...any) 
 }
 
 func (d *realSessionDB) SafeExec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	savePoint, execErr := d.tx.Begin(ctx)
 	if execErr != nil {
 		return pgconn.CommandTag{}, fmt.Errorf("Falha ao iniciar savepoint de guarda: %w, pro sql '''%s'''", execErr, sql)
@@ -354,8 +459,8 @@ func (d *realSessionDB) SafeExec(ctx context.Context, sql string, args ...any) (
 // must run on the main tx so the created savepoint is visible for later ROLLBACK/RELEASE;
 // RELEASE and ROLLBACK run inside a guard so a failure does not abort the main transaction.
 func (d *realSessionDB) SafeExecTCL(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if isSavepointCommand(sql) {
 		return d.tx.Exec(ctx, sql, args...)
 	}
@@ -402,6 +507,33 @@ func commandInvalidatesGuardOnSuccess(sql string) bool {
 	return s == "ROLLBACK" ||
 		strings.HasPrefix(s, "ROLLBACK TO SAVEPOINT") ||
 		strings.HasPrefix(s, "RELEASE SAVEPOINT")
+}
+
+// RollbackUserSavepointsOnDisconnect rolls back the given number of user-opened savepoints
+// (from user BEGINs) without touching the base transaction. Called when a client disconnects
+// so that uncommitted work is rolled back, matching real PostgreSQL behavior.
+// count is the number of open user transactions on that connection (from the proxy connection's counter).
+func (d *realSessionDB) RollbackUserSavepointsOnDisconnect(ctx context.Context, count int) error {
+	if count <= 0 {
+		return nil
+	}
+	for i := 0; i < count; i++ {
+		d.mu.Lock()
+		if d.SavepointLevel <= 0 {
+			d.mu.Unlock()
+			break
+		}
+		name := fmt.Sprintf("pgtest_v_%d", d.SavepointLevel)
+		d.SavepointLevel--
+		d.mu.Unlock()
+
+		sql := fmt.Sprintf("ROLLBACK TO SAVEPOINT %s; RELEASE SAVEPOINT %s", name, name)
+		if _, err := d.SafeExecTCL(ctx, sql); err != nil {
+			logIfVerbose("[PROXY] RollbackUserSavepointsOnDisconnect: %v", err)
+			return err
+		}
+	}
+	return nil
 }
 
 // HasActiveTransaction returns whether there is an active transaction (for status/reporting).
