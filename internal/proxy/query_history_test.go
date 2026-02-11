@@ -1,0 +1,364 @@
+package proxy
+
+import (
+	"testing"
+	"time"
+)
+
+// newTestSessionDB returns a realSessionDB with no real connection (nil conn/tx), suitable for query history unit tests.
+func newTestSessionDB() *realSessionDB {
+	return newSessionDB(nil, nil)
+}
+
+// --- isInternalNoiseQuery ---
+
+func TestIsInternalNoiseQuery_Empty(t *testing.T) {
+	if !isInternalNoiseQuery("") {
+		t.Error("empty string should be noise")
+	}
+	if !isInternalNoiseQuery("   ") {
+		t.Error("whitespace-only should be noise")
+	}
+}
+
+func TestIsInternalNoiseQuery_Deallocate(t *testing.T) {
+	cases := []struct {
+		query string
+		noise bool
+	}{
+		{"DEALLOCATE", true},
+		{"deallocate", true},
+		{"DEALLOCATE pdo_stmt_00000001", true},
+		{"DEALLOCATE ALL", true},
+		{"  DEALLOCATE pdo_stmt_00000001  ", true},
+		{"deallocate\tpdo_stmt_00000001", true},
+		{"SELECT 1", false},
+		{"DEALLOCATES", false}, // not a real deallocate
+	}
+	for _, c := range cases {
+		got := isInternalNoiseQuery(c.query)
+		if got != c.noise {
+			t.Errorf("isInternalNoiseQuery(%q) = %v, want %v", c.query, got, c.noise)
+		}
+	}
+}
+
+func TestIsInternalNoiseQuery_ReleaseSavepointIsNotNoise(t *testing.T) {
+	// RELEASE SAVEPOINT is a real user query, not noise
+	cases := []string{
+		"RELEASE SAVEPOINT pgtest_v_1",
+		"release savepoint pgtest_v_42",
+		"RELEASE SAVEPOINT user_sp_1",
+		"SAVEPOINT pgtest_v_1",
+		"ROLLBACK TO SAVEPOINT pgtest_v_1",
+	}
+	for _, q := range cases {
+		if isInternalNoiseQuery(q) {
+			t.Errorf("isInternalNoiseQuery(%q) = true, want false", q)
+		}
+	}
+}
+
+func TestIsInternalNoiseQuery_RegularQueries(t *testing.T) {
+	regular := []string{
+		"SELECT 1",
+		"INSERT INTO foo VALUES (1)",
+		"UPDATE foo SET bar = 1",
+		"DELETE FROM foo",
+		"BEGIN",
+		"COMMIT",
+		"ROLLBACK",
+		"SAVEPOINT pgtest_v_1",
+		"set search_path to \"public\"",
+	}
+	for _, q := range regular {
+		if isInternalNoiseQuery(q) {
+			t.Errorf("isInternalNoiseQuery(%q) = true, want false", q)
+		}
+	}
+}
+
+// --- SetLastQuery ---
+
+func TestSetLastQuery_Basic(t *testing.T) {
+	db := newTestSessionDB()
+	db.SetLastQuery("SELECT 1")
+	if got := db.GetLastQuery(); got != "SELECT 1" {
+		t.Errorf("GetLastQuery() = %q, want %q", got, "SELECT 1")
+	}
+}
+
+func TestSetLastQuery_SkipsNoise(t *testing.T) {
+	db := newTestSessionDB()
+	db.SetLastQuery("SELECT 1")
+	db.SetLastQuery("DEALLOCATE pdo_stmt_00000001")
+	if got := db.GetLastQuery(); got != "SELECT 1" {
+		t.Errorf("after noise, GetLastQuery() = %q, want %q", got, "SELECT 1")
+	}
+	hist := db.GetQueryHistory()
+	if len(hist) != 1 {
+		t.Errorf("history len = %d, want 1", len(hist))
+	}
+}
+
+func TestSetLastQuery_SkipsEmpty(t *testing.T) {
+	db := newTestSessionDB()
+	db.SetLastQuery("SELECT 1")
+	db.SetLastQuery("")
+	if got := db.GetLastQuery(); got != "SELECT 1" {
+		t.Errorf("after empty, GetLastQuery() = %q, want %q", got, "SELECT 1")
+	}
+}
+
+// --- Query history ordering ---
+
+func TestQueryHistory_ExecutionOrder(t *testing.T) {
+	db := newTestSessionDB()
+	queries := []string{"SELECT 1", "SELECT 2", "SELECT 3", "SELECT 4", "SELECT 5"}
+	for _, q := range queries {
+		db.SetLastQuery(q)
+		time.Sleep(time.Millisecond) // ensure timestamps differ
+	}
+	hist := db.GetQueryHistory()
+	if len(hist) != len(queries) {
+		t.Fatalf("history len = %d, want %d", len(hist), len(queries))
+	}
+	for i, entry := range hist {
+		if entry.Query != queries[i] {
+			t.Errorf("hist[%d].Query = %q, want %q", i, entry.Query, queries[i])
+		}
+	}
+	// Timestamps should be non-decreasing
+	for i := 1; i < len(hist); i++ {
+		if hist[i].At.Before(hist[i-1].At) {
+			t.Errorf("hist[%d].At (%v) is before hist[%d].At (%v)", i, hist[i].At, i-1, hist[i-1].At)
+		}
+	}
+}
+
+func TestQueryHistory_HasTimestamp(t *testing.T) {
+	db := newTestSessionDB()
+	before := time.Now()
+	db.SetLastQuery("SELECT 1")
+	after := time.Now()
+	hist := db.GetQueryHistory()
+	if len(hist) != 1 {
+		t.Fatalf("history len = %d, want 1", len(hist))
+	}
+	if hist[0].At.Before(before) || hist[0].At.After(after) {
+		t.Errorf("timestamp %v not between %v and %v", hist[0].At, before, after)
+	}
+}
+
+// --- Max history ---
+
+func TestQueryHistory_MaxLimit(t *testing.T) {
+	db := newTestSessionDB()
+	for i := 0; i < maxQueryHistory+20; i++ {
+		db.SetLastQuery("SELECT " + time.Now().String())
+	}
+	hist := db.GetQueryHistory()
+	if len(hist) != maxQueryHistory {
+		t.Errorf("history len = %d, want %d (max)", len(hist), maxQueryHistory)
+	}
+}
+
+func TestQueryHistory_MaxPreservesNewest(t *testing.T) {
+	db := newTestSessionDB()
+	for i := 0; i < maxQueryHistory+5; i++ {
+		db.SetLastQuery("Q" + time.Now().String())
+	}
+	// Add a known query at the end
+	db.SetLastQuery("LAST_QUERY")
+	hist := db.GetQueryHistory()
+	last := hist[len(hist)-1]
+	if last.Query != "LAST_QUERY" {
+		t.Errorf("last entry = %q, want %q", last.Query, "LAST_QUERY")
+	}
+}
+
+// --- ClearQueryHistory ---
+
+func TestClearQueryHistory(t *testing.T) {
+	db := newTestSessionDB()
+	db.SetLastQuery("SELECT 1")
+	db.SetLastQuery("SELECT 2")
+	db.ClearQueryHistory()
+	if got := db.GetLastQuery(); got != "" {
+		t.Errorf("after clear, GetLastQuery() = %q, want empty", got)
+	}
+	hist := db.GetQueryHistory()
+	if hist != nil {
+		t.Errorf("after clear, GetQueryHistory() = %v, want nil", hist)
+	}
+}
+
+func TestClearLastQuery(t *testing.T) {
+	db := newTestSessionDB()
+	db.SetLastQuery("SELECT 1")
+	db.ClearLastQuery()
+	if got := db.GetLastQuery(); got != "" {
+		t.Errorf("after ClearLastQuery, got = %q, want empty", got)
+	}
+	// History should still be there
+	hist := db.GetQueryHistory()
+	if len(hist) != 1 {
+		t.Errorf("history len = %d, want 1", len(hist))
+	}
+}
+
+// --- GetQueryHistory returns copy ---
+
+func TestQueryHistory_ReturnsCopy(t *testing.T) {
+	db := newTestSessionDB()
+	db.SetLastQuery("SELECT 1")
+	hist1 := db.GetQueryHistory()
+	hist1[0].Query = "MODIFIED"
+	hist2 := db.GetQueryHistory()
+	if hist2[0].Query == "MODIFIED" {
+		t.Error("modifying returned slice should not affect internal state")
+	}
+}
+
+// --- substituteParams ---
+
+func TestSubstituteParams_Basic(t *testing.T) {
+	got := substituteParams("SELECT $1, $2", []any{"hello", int32(42)})
+	want := "SELECT 'hello', 42"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestSubstituteParams_HighIndexFirst(t *testing.T) {
+	// $10 should not be confused with $1
+	args := make([]any, 10)
+	for i := range args {
+		args[i] = i + 1
+	}
+	got := substituteParams("$1 $10", args)
+	want := "1 10"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestSubstituteParams_Nil(t *testing.T) {
+	got := substituteParams("SELECT $1", []any{nil})
+	want := "SELECT NULL"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestSubstituteParams_NoArgs(t *testing.T) {
+	got := substituteParams("SELECT 1", nil)
+	if got != "SELECT 1" {
+		t.Errorf("got %q, want %q", got, "SELECT 1")
+	}
+}
+
+// --- formatArgForSQL ---
+
+func TestFormatArgForSQL(t *testing.T) {
+	cases := []struct {
+		input any
+		want  string
+	}{
+		{nil, "NULL"},
+		{int32(42), "42"},
+		{int64(-100), "-100"},
+		{int(7), "7"},
+		{float64(3.14), "3.14"},
+		{float32(2.5), "2.5"},
+		{true, "true"},
+		{false, "false"},
+		{"hello", "'hello'"},
+		{"it's", "'it''s'"},
+		{[]byte("bytes"), "'bytes'"},
+		{[]byte("it's"), "'it''s'"},
+	}
+	for _, c := range cases {
+		got := formatArgForSQL(c.input)
+		if got != c.want {
+			t.Errorf("formatArgForSQL(%v) = %q, want %q", c.input, got, c.want)
+		}
+	}
+}
+
+// --- SetLastQueryWithParams ---
+
+func TestSetLastQueryWithParams_Substitutes(t *testing.T) {
+	db := newTestSessionDB()
+	db.SetLastQueryWithParams("UPDATE foo SET bar = $1 WHERE id = $2", []any{"value", int32(123)})
+	got := db.GetLastQuery()
+	want := "UPDATE foo SET bar = 'value' WHERE id = 123"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestSetLastQueryWithParams_NoArgs(t *testing.T) {
+	db := newTestSessionDB()
+	db.SetLastQueryWithParams("SELECT 1", nil)
+	if got := db.GetLastQuery(); got != "SELECT 1" {
+		t.Errorf("got %q, want %q", got, "SELECT 1")
+	}
+}
+
+func TestSetLastQueryWithParams_EmptyArgs(t *testing.T) {
+	db := newTestSessionDB()
+	db.SetLastQueryWithParams("SELECT 1", []any{})
+	if got := db.GetLastQuery(); got != "SELECT 1" {
+		t.Errorf("got %q, want %q", got, "SELECT 1")
+	}
+}
+
+func TestSetLastQueryWithParams_SkipsNoise(t *testing.T) {
+	db := newTestSessionDB()
+	db.SetLastQuery("SELECT 1")
+	db.SetLastQueryWithParams("DEALLOCATE pdo_stmt_00000001", []any{"ignored"})
+	if got := db.GetLastQuery(); got != "SELECT 1" {
+		t.Errorf("noise should be skipped, got %q", got)
+	}
+}
+
+// --- escapeSQLString ---
+
+func TestEscapeSQLString(t *testing.T) {
+	cases := []struct {
+		input, want string
+	}{
+		{"hello", "hello"},
+		{"it's", "it''s"},
+		{"a''b", "a''''b"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		got := escapeSQLString(c.input)
+		if got != c.want {
+			t.Errorf("escapeSQLString(%q) = %q, want %q", c.input, got, c.want)
+		}
+	}
+}
+
+// --- HasOpenUserTransaction ---
+
+func TestHasOpenUserTransaction(t *testing.T) {
+	db := newTestSessionDB()
+	if db.HasOpenUserTransaction() {
+		t.Error("new session should not have open user transaction")
+	}
+	// Simulate a user BEGIN
+	if err := db.ClaimOpenTransaction(ConnectionID(1)); err != nil {
+		t.Fatal(err)
+	}
+	if !db.HasOpenUserTransaction() {
+		t.Error("after ClaimOpenTransaction, should have open user transaction")
+	}
+	// Release
+	db.ReleaseOpenTransaction(ConnectionID(1))
+	if db.HasOpenUserTransaction() {
+		t.Error("after ReleaseOpenTransaction, should not have open user transaction")
+	}
+}
