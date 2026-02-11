@@ -1,15 +1,13 @@
 package main
 
 import (
-	"context"
+	"fmt"
 	"log"
 	"os"
-	"os/signal"
-	"syscall"
-	"time"
 
 	"pgtest-transient/internal/config"
 	"pgtest-transient/internal/proxy"
+	"pgtest-transient/internal/tray"
 	"pgtest-transient/pkg/logger"
 )
 
@@ -57,22 +55,16 @@ func main() {
 		log.Fatalf("Failed to start server: %v", err)
 	}
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	guiURL := fmt.Sprintf("http://%s:%d/", cfg.Proxy.ListenHost, cfg.Proxy.ListenPort)
+	log.Printf("PGTest server started on port %d", cfg.Proxy.ListenPort)
+	log.Printf("GUI: %s", guiURL)
 
-	log.Printf("PGTest server started on port %d. Press Ctrl+C to stop.", cfg.Proxy.ListenPort)
-	log.Printf("GUI: http://%s:%d/", cfg.Proxy.ListenHost, cfg.Proxy.ListenPort)
-
-	<-sigChan
-	log.Println("Shutting down server...")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := server.Stop(); err != nil {
-		log.Printf("Error stopping server: %v", err)
-	}
-
-	_ = ctx
-	log.Println("Server stopped")
+	// System tray icon blocks the main goroutine until the user clicks Quit.
+	tray.Run(guiURL, func() {
+		log.Println("Shutting down server...")
+		if err := server.Stop(); err != nil {
+			log.Printf("Error stopping server: %v", err)
+		}
+		log.Println("Server stopped")
+	})
 }

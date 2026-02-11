@@ -24,12 +24,11 @@ type queryHistoryEntry struct {
 // - DEALLOCATE [name]: sent by many drivers after each prepared statement use (expected protocol cleanup).
 // - RELEASE SAVEPOINT pgtest_v_*: our internal savepoint release (TCL), not application logic.
 func isInternalNoiseQuery(query string) bool {
-	q := strings.TrimSpace(query)
+	q := strings.ToUpper(strings.TrimSpace(query))
 	if q == "" {
 		return true
 	}
 	uq := strings.ToUpper(q)
-	// DEALLOCATE or DEALLOCATE <anything>
 	if strings.HasPrefix(uq, "DEALLOCATE") {
 		if len(uq) == 10 || uq[10] == ' ' || uq[10] == '\t' {
 			return true

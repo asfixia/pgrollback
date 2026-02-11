@@ -1,16 +1,22 @@
 package gui
 
-import "strings"
+import (
+	"strings"
+
+	"pgtest-transient/internal/tray"
+)
 
 const apiBasePlaceholder = "__API_BASE__"
+const faviconPlaceholder = "__FAVICON_DATA_URI__"
 
-// htmlTemplate is the full GUI page; __API_BASE__ is replaced with the API path prefix (e.g. /api or /gui/api).
+// htmlTemplate is the full GUI page; __API_BASE__ and __FAVICON_DATA_URI__ are replaced at runtime.
 const htmlTemplate = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PGTest Sessions</title>
+  <link rel="icon" type="image/x-icon" href="__FAVICON_DATA_URI__">
   <style>
     *, *::before, *::after { box-sizing: border-box; }
     body {
@@ -577,9 +583,11 @@ func apiBaseFrom(base string) string {
 	return "/api"
 }
 
-// HTMLWithBase returns the GUI page HTML with API path prefix set (e.g. "" for /api, "/gui" for /gui/api).
+// HTMLWithBase returns the GUI page HTML with API path prefix and favicon set.
 func HTMLWithBase(base string) string {
-	return strings.ReplaceAll(htmlTemplate, apiBasePlaceholder, apiBaseFrom(base))
+	s := strings.ReplaceAll(htmlTemplate, apiBasePlaceholder, apiBaseFrom(base))
+	s = strings.ReplaceAll(s, faviconPlaceholder, tray.FaviconDataURI())
+	return s
 }
 
 // HTML returns the GUI page HTML for the default route (API at /api).
