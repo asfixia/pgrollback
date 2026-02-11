@@ -27,19 +27,20 @@ var ErrOnlyOneTransactionAtATime = errors.New("only one transaction could start 
 // Callers use Query/Exec; the abstraction ensures the right object (tx) is used.
 // You cannot "get the transaction from Conn" in pgx—Conn.Begin() returns a Tx, so both are stored and managed here.
 type realSessionDB struct {
-	conn                   *pgx.Conn
-	tx                     pgx.Tx
-	mu                     sync.RWMutex // state + serializes SQL execution (Lock for SafeExec/SafeQuery/SafeExecTCL and PgConn().Exec)
+	conn                 *pgx.Conn
+	tx                   pgx.Tx
+	mu                   sync.RWMutex // state + serializes SQL execution (Lock for SafeExec/SafeQuery/SafeExecTCL and PgConn().Exec)
 	SavepointLevel       int
 	connectionWithOpenTx ConnectionID // which connection has the transaction; 0 when none
 	stopKeepalive        func()
-	lastQuery              string
-	preparedStatements     map[string]string                       // statement name -> intercepted query (Extended Query); always non-nil (set in newSessionDB)
-	statementDescs         map[string]*pgconn.StatementDescription // statement name -> cached description from Prepare(); may be nil entry
-	portalToStatement      map[string]string                       // portal name -> statement name (Extended Query); always non-nil (set in newSessionDB)
-	portalParams           map[string][][]byte                     // portal name -> bound parameter values (from Bind); always non-nil
-	portalFormatCodes      map[string][]int16                      // portal name -> ParameterFormatCodes (0=text, 1=binary)
-	portalResultFormats    map[string][]int16                      // portal name -> ResultFormatCodes (from Bind)
+	lastQuery            string
+	queryHistory         []queryHistoryEntry                     // last N executed queries (oldest first), max maxQueryHistory
+	preparedStatements   map[string]string                       // statement name -> intercepted query (Extended Query); always non-nil (set in newSessionDB)
+	statementDescs       map[string]*pgconn.StatementDescription // statement name -> cached description from Prepare(); may be nil entry
+	portalToStatement    map[string]string                       // portal name -> statement name (Extended Query); always non-nil (set in newSessionDB)
+	portalParams         map[string][][]byte                     // portal name -> bound parameter values (from Bind); always non-nil
+	portalFormatCodes    map[string][]int16                      // portal name -> ParameterFormatCodes (0=text, 1=binary)
+	portalResultFormats  map[string][]int16                      // portal name -> ResultFormatCodes (from Bind)
 }
 
 func (d *realSessionDB) GetSavepointLevel() int {
@@ -267,11 +268,11 @@ func (d *realSessionDB) CloseStatementOrPortal(objectType byte, name string) {
 	}
 }
 
-// ClearLastQuery clears the lastQuery field (used e.g. on full rollback).
-func (d *realSessionDB) ClearLastQuery() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.lastQuery = ""
+// GetLastQuery returns the last executed query for this session (for GUI/status).
+func (d *realSessionDB) GetLastQuery() string {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.lastQuery
 }
 
 // Ensure realSessionDB implements pgxQueryer (used by tx_guard).
@@ -544,6 +545,14 @@ func (d *realSessionDB) HasActiveTransaction() bool {
 	return d.tx != nil
 }
 
+// HasOpenUserTransaction returns true if a connection has started a user transaction (BEGIN)
+// and not yet committed or rolled back. Use this for GUI/status to show "user tx open" vs internal state.
+func (d *realSessionDB) HasOpenUserTransaction() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.connectionWithOpenTx != 0
+}
+
 // beginTx starts a new transaction on the connection. Idempotent if already in a transaction (no-op).
 func (d *realSessionDB) beginTx(ctx context.Context) error {
 	d.mu.Lock()
@@ -606,6 +615,8 @@ func (d *realSessionDB) startNewTx(ctx context.Context) error {
 func (d *realSessionDB) close(ctx context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.lastQuery = ""
+	d.queryHistory = nil
 	if d.stopKeepalive != nil {
 		d.stopKeepalive()
 		d.stopKeepalive = nil

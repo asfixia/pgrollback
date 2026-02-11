@@ -51,6 +51,7 @@ func (p *proxyConnection) ForwardCommandToDB(testID string, query string, sendRe
 	var err error
 
 	log.Printf("[PROXY] ForwardCommandToDB: Executando via transação: %s", query)
+	session.DB.SetLastQuery(query)
 
 	// All TCL (SAVEPOINT, RELEASE, ROLLBACK) goes to SafeExecTCL, which runs inside a guard
 	// so failed TCL does not abort the main transaction; it skips guard Commit on success
@@ -137,8 +138,8 @@ func (p *proxyConnection) ForwardMultipleCommandsToDB(testID string, commands []
 	}
 
 	session.DB.LockRun()
-
 	fullQuery := strings.Join(commands, "; ")
+	session.DB.SetLastQuery(fullQuery)
 	if !strings.HasSuffix(fullQuery, ";") {
 		fullQuery += ";"
 	}
@@ -257,6 +258,9 @@ func (p *proxyConnection) ExecuteSelectQuery(testID string, query string, sendRe
 	session := p.server.Pgtest.GetSession(testID)
 	if session == nil {
 		return fmt.Errorf("sessão não encontrada para testID: %s", testID)
+	}
+	if session.DB != nil && query != "" {
+		session.DB.SetLastQuery(query)
 	}
 
 	rows, err := session.DB.SafeQuery(context.Background(), query, args...)

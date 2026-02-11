@@ -54,6 +54,7 @@ func TestMain(m *testing.M) {
 		0,
 		host,
 		port,
+		false,
 	)
 	if err := proxyTestServer.StartError(); err != nil {
 		fmt.Fprintf(os.Stderr, "proxy test: failed to start server: %v\n", err)
@@ -138,6 +139,7 @@ func connectToProxyForTest(t *testing.T, testID string) (*sql.DB, context.Contex
 		0,
 		cfg.Proxy.ListenHost,
 		cfg.Proxy.ListenPort,
+		false,
 	)
 	if err := proxyServer.StartError(); err != nil {
 		t.Fatalf("Failed to start proxy server: %v", err)
@@ -173,6 +175,7 @@ func connectToProxyForTestWithAppName(t *testing.T, applicationName string) (*sq
 		0,
 		cfg.Proxy.ListenHost,
 		cfg.Proxy.ListenPort,
+		false,
 	)
 	if err := proxyServer.StartError(); err != nil {
 		t.Fatalf("Failed to start proxy server: %v", err)
@@ -208,6 +211,7 @@ func connectToProxyForTestWithServer(t *testing.T, testID string) (*sql.DB, cont
 		0,
 		cfg.Proxy.ListenHost,
 		cfg.Proxy.ListenPort,
+		false,
 	)
 	if err := proxyServer.StartError(); err != nil {
 		t.Fatalf("Failed to start proxy server: %v", err)
@@ -243,6 +247,7 @@ func connectToProxyForTestWithAppNameAndServer(t *testing.T, applicationName str
 		0,
 		cfg.Proxy.ListenHost,
 		cfg.Proxy.ListenPort,
+		false,
 	)
 	if err := proxyServer.StartError(); err != nil {
 		t.Fatalf("Failed to start proxy server: %v", err)

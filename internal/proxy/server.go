@@ -2,11 +2,13 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"strconv"
 	"sync"
 	"time"
@@ -32,11 +34,15 @@ const (
 )
 
 type Server struct {
-	Pgtest   *PGTest
-	listener net.Listener
-	wg       sync.WaitGroup
-	startErr error
-	mu       sync.RWMutex
+	Pgtest       *PGTest
+	listener     net.Listener
+	wg           sync.WaitGroup
+	startErr     error
+	mu           sync.RWMutex
+	// GUI on same port: connections that look like HTTP are pushed here and served by guiHTTP
+	guiCh        chan net.Conn
+	guiListener  *injectListener
+	guiHTTP      *http.Server
 }
 
 // isPortInUse verifica se uma porta está em uso tentando conectar a ela
@@ -56,7 +62,7 @@ func isPortInUse(host string, port int) bool {
 // Se sessionTimeout for 0, usa DefaultSessionTimeout (24h) como padrão
 // Verifica se a porta está disponível antes de tentar iniciar o servidor
 // Se houver erro ao iniciar, o erro é armazenado no Server e pode ser verificado com StartError()
-func NewServer(postgresHost string, postgresPort int, postgresDB, postgresUser, postgresPass string, timeout time.Duration, sessionTimeout time.Duration, keepaliveInterval time.Duration, listenHost string, listenPort int) *Server {
+func NewServer(postgresHost string, postgresPort int, postgresDB, postgresUser, postgresPass string, timeout time.Duration, sessionTimeout time.Duration, keepaliveInterval time.Duration, listenHost string, listenPort int, withGUI bool) *Server {
 	// Usa valores padrão se não especificados
 	if sessionTimeout <= 0 {
 		sessionTimeout = DefaultSessionTimeout
@@ -92,6 +98,17 @@ func NewServer(postgresHost string, postgresPort int, postgresDB, postgresUser, 
 	}
 
 	server.listener = listener
+
+	if withGUI {
+		server.guiCh = make(chan net.Conn, 32)
+		server.guiListener = newInjectListenerWithChan(server.guiCh)
+		server.guiHTTP = &http.Server{Handler: guiMux(server)}
+		go func() {
+			if err := server.guiHTTP.Serve(server.guiListener); err != nil && err != http.ErrServerClosed {
+				log.Printf("[GUI] Server error: %v", err)
+			}
+		}()
+	}
 
 	// Inicia o loop de aceitação de conexões em uma goroutine
 	go server.acceptConnections()
@@ -164,6 +181,33 @@ func (s *Server) acceptConnections() {
 			continue
 		}
 
+		if s.guiCh != nil {
+			conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			peeked := make([]byte, peekSize)
+			n, peekErr := conn.Read(peeked)
+			conn.SetReadDeadline(time.Time{})
+			if peekErr == nil && n > 0 {
+				peeked = peeked[:n]
+				wrapped := newPeekedConn(conn, peeked)
+				if isHTTPPeek(peeked) {
+					s.guiListener.Push(wrapped)
+					continue
+				}
+				s.wg.Add(1)
+				go s.handleConnection(wrapped)
+				continue
+			}
+			// Peek failed or no data: treat as PostgreSQL (replay nothing would be wrong, so use peeked if any)
+			if n > 0 {
+				wrapped := newPeekedConn(conn, peeked[:n])
+				s.wg.Add(1)
+				go s.handleConnection(wrapped)
+			} else {
+				conn.Close()
+			}
+			continue
+		}
+
 		s.wg.Add(1)
 		go s.handleConnection(conn)
 	}
@@ -177,6 +221,14 @@ func (s *Server) Stop() error {
 		s.mu.Unlock()
 		if err := listener.Close(); err != nil {
 			return err
+		}
+		if s.guiListener != nil {
+			_ = s.guiListener.Close()
+		}
+		if s.guiHTTP != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = s.guiHTTP.Shutdown(ctx)
+			cancel()
 		}
 	} else {
 		s.mu.Unlock()

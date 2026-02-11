@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,31 +14,31 @@ import (
 )
 
 type Config struct {
-	Postgres PostgresConfig `yaml:"postgres"`
-	Proxy    ProxyConfig    `yaml:"proxy"`
-	Logging  LoggingConfig  `yaml:"logging"`
-	Test     TestConfig     `yaml:"test"`
+	Postgres PostgresConfig `yaml:"postgres" json:"postgres"`
+	Proxy    ProxyConfig    `yaml:"proxy" json:"proxy"`
+	Logging  LoggingConfig  `yaml:"logging" json:"logging"`
+	Test     TestConfig     `yaml:"test" json:"test"`
 }
 
 type PostgresConfig struct {
-	Host           string   `yaml:"host"`
-	Port           int      `yaml:"port"`
-	Database       string   `yaml:"database"`
-	User           string   `yaml:"user"`
-	Password       string   `yaml:"password"`
-	SessionTimeout Duration `yaml:"session_timeout"` // Timeout de sessão PostgreSQL (idle_in_transaction_session_timeout)
+	Host           string   `yaml:"host" json:"host"`
+	Port           int      `yaml:"port" json:"port"`
+	Database       string   `yaml:"database" json:"database"`
+	User           string   `yaml:"user" json:"user"`
+	Password       string   `yaml:"password" json:"password"`
+	SessionTimeout Duration `yaml:"session_timeout" json:"session_timeout"` // Timeout de sessão PostgreSQL (idle_in_transaction_session_timeout)
 }
 
 type ProxyConfig struct {
-	ListenHost        string        `yaml:"listen_host"`
-	ListenPort        int           `yaml:"listen_port"`
-	Timeout           time.Duration `yaml:"timeout"`
-	KeepaliveInterval Duration      `yaml:"keepalive_interval"` // Intervalo de ping para manter conexão viva (ex.: em debugging)
+	ListenHost        string        `yaml:"listen_host" json:"listen_host"`
+	ListenPort        int           `yaml:"listen_port" json:"listen_port"`
+	Timeout           time.Duration `yaml:"timeout" json:"timeout"`
+	KeepaliveInterval Duration      `yaml:"keepalive_interval" json:"keepalive_interval"` // Intervalo de ping para manter conexão viva (ex.: em debugging)
 }
 
 type LoggingConfig struct {
-	Level string `yaml:"level"`
-	File  string `yaml:"file"`
+	Level string `yaml:"level" json:"level"`
+	File  string `yaml:"file" json:"file"`
 }
 
 // Duration é um tipo customizado para fazer parsing de time.Duration do YAML
@@ -58,11 +59,32 @@ func (d *Duration) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	return nil
 }
 
+func (d Duration) MarshalYAML() (interface{}, error) {
+	return d.Duration.String(), nil
+}
+
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(d.Duration.String())
+}
+
+func (d *Duration) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	dur, err := time.ParseDuration(s)
+	if err != nil {
+		return err
+	}
+	d.Duration = dur
+	return nil
+}
+
 type TestConfig struct {
-	Schema         string   `yaml:"schema"`
-	ContextTimeout Duration `yaml:"context_timeout"` // Timeout para contexto principal dos testes
-	QueryTimeout   Duration `yaml:"query_timeout"`   // Timeout para execução de queries
-	PingTimeout    Duration `yaml:"ping_timeout"`    // Timeout para ping
+	Schema         string   `yaml:"schema" json:"schema"`
+	ContextTimeout Duration `yaml:"context_timeout" json:"context_timeout"` // Timeout para contexto principal dos testes
+	QueryTimeout   Duration `yaml:"query_timeout" json:"query_timeout"`   // Timeout para execução de queries
+	PingTimeout    Duration `yaml:"ping_timeout" json:"ping_timeout"`     // Timeout para ping
 }
 
 // LoadConfigResult contém o resultado do carregamento da configuração
@@ -234,5 +256,53 @@ func validateConfig(config *Config) error {
 	if config.Postgres.User == "" {
 		return fmt.Errorf("POSTGRES_USER is required")
 	}
+	return nil
+}
+
+// PasswordMask is the value returned for password in config API responses.
+const PasswordMask = "****"
+
+// ConfigForAPI returns a copy of the config with password masked as PasswordMask for API/UI display.
+func ConfigForAPI(c *Config) *Config {
+	if c == nil {
+		return nil
+	}
+	out := *c
+	out.Postgres.Password = ""
+	if c.Postgres.Password != "" {
+		out.Postgres.Password = PasswordMask
+	}
+	return &out
+}
+
+// UpdateAndSave merges updated into the current config (keeping existing password if updated sends "" or "****"),
+// validates, writes to the config file, and updates in-memory config. Returns error if path is empty or write fails.
+func UpdateAndSave(updated *Config) error {
+	if updated == nil {
+		return fmt.Errorf("config is nil")
+	}
+	path := GetConfigPath()
+	if path == "" {
+		return fmt.Errorf("config file path not set (cannot save)")
+	}
+	current, ok := GetCfgIfSet()
+	if !ok {
+		return fmt.Errorf("config not initialized")
+	}
+	merged := *updated
+	if updated.Postgres.Password == "" || updated.Postgres.Password == PasswordMask {
+		merged.Postgres.Password = current.Postgres.Password
+	}
+	if err := validateConfig(&merged); err != nil {
+		return err
+	}
+	data, err := yaml.Marshal(&merged)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("write config file: %w", err)
+	}
+	SetConfig(&merged)
 	return nil
 }

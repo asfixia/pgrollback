@@ -79,6 +79,7 @@ func TestMain(m *testing.M) {
 		keepaliveInterval,
 		cfg.Proxy.ListenHost,
 		pgtestListenPort,
+		false,
 	)
 	if err := pgtestServer.StartError(); err != nil {
 		fmt.Printf("Failed to start server: %v\n", err)

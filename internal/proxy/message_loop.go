@@ -225,10 +225,15 @@ func (p *proxyConnection) RunMessageLoop(testID string) {
 				continue
 			}
 			stmtName := session.DB.PortalStatementName(msg.Portal)
-			_, params, formatCodes, ok := session.DB.QueryForPortal(msg.Portal)
+			query, params, formatCodes, ok := session.DB.QueryForPortal(msg.Portal)
 			if !ok {
 				p.SendErrorResponse(fmt.Errorf("portal ou statement não encontrado para execução (portal=%q)", msg.Portal))
 				continue
+			}
+			// Record extended-query in session for GUI (last query + history), with params substituted for display.
+			if query != "" {
+				args := bindParamsToArgs(params, formatCodes)
+				session.DB.SetLastQueryWithParams(query, args)
 			}
 			resultFormats := session.DB.PortalResultFormats(msg.Portal)
 			if err := p.executeViaExecPrepared(context.Background(), session.DB.PgConn(), stmtName, params, formatCodes, resultFormats); err != nil {

@@ -39,17 +39,19 @@ func main() {
 		logger.Info("Using config file: %s", configResult.ConfigPath)
 	}
 
+	cfg := config.GetCfg()
 	server := proxy.NewServer(
-		config.GetCfg().Postgres.Host,
-		config.GetCfg().Postgres.Port,
-		config.GetCfg().Postgres.Database,
-		config.GetCfg().Postgres.User,
-		config.GetCfg().Postgres.Password,
-		config.GetCfg().Proxy.Timeout,
-		config.GetCfg().Postgres.SessionTimeout.Duration,
-		config.GetCfg().Proxy.KeepaliveInterval.Duration,
-		config.GetCfg().Proxy.ListenHost,
-		config.GetCfg().Proxy.ListenPort,
+		cfg.Postgres.Host,
+		cfg.Postgres.Port,
+		cfg.Postgres.Database,
+		cfg.Postgres.User,
+		cfg.Postgres.Password,
+		cfg.Proxy.Timeout,
+		cfg.Postgres.SessionTimeout.Duration,
+		cfg.Proxy.KeepaliveInterval.Duration,
+		cfg.Proxy.ListenHost,
+		cfg.Proxy.ListenPort,
+		true, // GUI on same port at /gui
 	)
 	if err := server.StartError(); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
@@ -58,7 +60,8 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	log.Printf("PGTest server started on port %d. Press Ctrl+C to stop.", config.GetCfg().Proxy.ListenPort)
+	log.Printf("PGTest server started on port %d. Press Ctrl+C to stop.", cfg.Proxy.ListenPort)
+	log.Printf("GUI: http://%s:%d/", cfg.Proxy.ListenHost, cfg.Proxy.ListenPort)
 
 	<-sigChan
 	log.Println("Shutting down server...")

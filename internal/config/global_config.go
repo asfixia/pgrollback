@@ -7,6 +7,7 @@ import (
 type GlobalConfig struct {
 	instance   *Config
 	configPath string
+	mu         sync.RWMutex
 }
 
 var (
@@ -24,6 +25,8 @@ func Init() {
 }
 
 func SetOnce(config *Config, cfgPath string) {
+	global.mu.Lock()
+	defer global.mu.Unlock()
 	if global.instance != nil {
 		panic("AppConfig already initialized")
 	}
@@ -31,10 +34,35 @@ func SetOnce(config *Config, cfgPath string) {
 	global.configPath = cfgPath
 }
 
-func GetCfg() *Config {
+// GetCfgIfSet returns the current config and true if config was initialized, or (nil, false).
+func GetCfgIfSet() (*Config, bool) {
+	global.mu.RLock()
+	defer global.mu.RUnlock()
 	if global.instance == nil {
-		panic("AppConfig not initialized")
+		return nil, false
 	}
 	cloned := *global.instance
-	return &cloned
+	return &cloned, true
+}
+
+func GetCfg() *Config {
+	cfg, ok := GetCfgIfSet()
+	if !ok {
+		panic("AppConfig not initialized")
+	}
+	return cfg
+}
+
+// GetConfigPath returns the path to the config file in use, or empty if not set.
+func GetConfigPath() string {
+	global.mu.RLock()
+	defer global.mu.RUnlock()
+	return global.configPath
+}
+
+// SetConfig replaces the in-memory config (used after saving to file).
+func SetConfig(c *Config) {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	global.instance = c
 }
