@@ -3,6 +3,8 @@ package proxy
 import (
 	"testing"
 	"time"
+
+	sqlpkg "pgtest-sandbox/pkg/sql"
 )
 
 // newTestSessionDB returns a realSessionDB with no real connection (nil conn/tx), suitable for query history unit tests.
@@ -220,10 +222,10 @@ func TestQueryHistory_ReturnsCopy(t *testing.T) {
 	}
 }
 
-// --- substituteParams ---
+// --- SubstituteParams (via sql package) ---
 
 func TestSubstituteParams_Basic(t *testing.T) {
-	got := substituteParams("SELECT $1, $2", []any{"hello", int32(42)})
+	got := sqlpkg.SubstituteParams("SELECT $1, $2", []any{"hello", int32(42)}, "")
 	want := "SELECT 'hello', 42"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -236,7 +238,7 @@ func TestSubstituteParams_HighIndexFirst(t *testing.T) {
 	for i := range args {
 		args[i] = i + 1
 	}
-	got := substituteParams("$1 $10", args)
+	got := sqlpkg.SubstituteParams("$1 $10", args, "")
 	want := "1 10"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -244,7 +246,7 @@ func TestSubstituteParams_HighIndexFirst(t *testing.T) {
 }
 
 func TestSubstituteParams_Nil(t *testing.T) {
-	got := substituteParams("SELECT $1", []any{nil})
+	got := sqlpkg.SubstituteParams("SELECT $1", []any{nil}, "")
 	want := "SELECT NULL"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -252,37 +254,9 @@ func TestSubstituteParams_Nil(t *testing.T) {
 }
 
 func TestSubstituteParams_NoArgs(t *testing.T) {
-	got := substituteParams("SELECT 1", nil)
+	got := sqlpkg.SubstituteParams("SELECT 1", nil, "")
 	if got != "SELECT 1" {
 		t.Errorf("got %q, want %q", got, "SELECT 1")
-	}
-}
-
-// --- formatArgForSQL ---
-
-func TestFormatArgForSQL(t *testing.T) {
-	cases := []struct {
-		input any
-		want  string
-	}{
-		{nil, "NULL"},
-		{int32(42), "42"},
-		{int64(-100), "-100"},
-		{int(7), "7"},
-		{float64(3.14), "3.14"},
-		{float32(2.5), "2.5"},
-		{true, "true"},
-		{false, "false"},
-		{"hello", "'hello'"},
-		{"it's", "'it''s'"},
-		{[]byte("bytes"), "'bytes'"},
-		{[]byte("it's"), "'it''s'"},
-	}
-	for _, c := range cases {
-		got := formatArgForSQL(c.input)
-		if got != c.want {
-			t.Errorf("formatArgForSQL(%v) = %q, want %q", c.input, got, c.want)
-		}
 	}
 }
 
@@ -290,7 +264,7 @@ func TestFormatArgForSQL(t *testing.T) {
 
 func TestSetLastQueryWithParams_Substitutes(t *testing.T) {
 	db := newTestSessionDB()
-	db.SetLastQueryWithParams("UPDATE foo SET bar = $1 WHERE id = $2", []any{"value", int32(123)})
+	db.SetLastQueryWithParams("UPDATE foo SET bar = $1 WHERE id = $2", []any{"value", int32(123)}, "")
 	got := db.GetLastQuery()
 	want := "UPDATE foo SET bar = 'value' WHERE id = 123"
 	if got != want {
@@ -300,7 +274,7 @@ func TestSetLastQueryWithParams_Substitutes(t *testing.T) {
 
 func TestSetLastQueryWithParams_NoArgs(t *testing.T) {
 	db := newTestSessionDB()
-	db.SetLastQueryWithParams("SELECT 1", nil)
+	db.SetLastQueryWithParams("SELECT 1", nil, "")
 	if got := db.GetLastQuery(); got != "SELECT 1" {
 		t.Errorf("got %q, want %q", got, "SELECT 1")
 	}
@@ -308,7 +282,7 @@ func TestSetLastQueryWithParams_NoArgs(t *testing.T) {
 
 func TestSetLastQueryWithParams_EmptyArgs(t *testing.T) {
 	db := newTestSessionDB()
-	db.SetLastQueryWithParams("SELECT 1", []any{})
+	db.SetLastQueryWithParams("SELECT 1", []any{}, "")
 	if got := db.GetLastQuery(); got != "SELECT 1" {
 		t.Errorf("got %q, want %q", got, "SELECT 1")
 	}
@@ -317,28 +291,9 @@ func TestSetLastQueryWithParams_EmptyArgs(t *testing.T) {
 func TestSetLastQueryWithParams_SkipsNoise(t *testing.T) {
 	db := newTestSessionDB()
 	db.SetLastQuery("SELECT 1")
-	db.SetLastQueryWithParams("DEALLOCATE pdo_stmt_00000001", []any{"ignored"})
+	db.SetLastQueryWithParams("DEALLOCATE pdo_stmt_00000001", []any{"ignored"}, "")
 	if got := db.GetLastQuery(); got != "SELECT 1" {
 		t.Errorf("noise should be skipped, got %q", got)
-	}
-}
-
-// --- escapeSQLString ---
-
-func TestEscapeSQLString(t *testing.T) {
-	cases := []struct {
-		input, want string
-	}{
-		{"hello", "hello"},
-		{"it's", "it''s"},
-		{"a''b", "a''''b"},
-		{"", ""},
-	}
-	for _, c := range cases {
-		got := escapeSQLString(c.input)
-		if got != c.want {
-			t.Errorf("escapeSQLString(%q) = %q, want %q", c.input, got, c.want)
-		}
 	}
 }
 

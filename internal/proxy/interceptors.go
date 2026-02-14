@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"pgtest-sandbox/pkg/sql"
 )
 
 const (
@@ -14,6 +16,7 @@ const (
 
 // InterceptQuery intercepta e modifica queries específicas antes da execução.
 // connID is the connection making the request; pass 0 when there is no connection (e.g. tests). When connID != 0, BEGIN fails if another connection already has an open transaction.
+// PGTEST commands are checked first (not valid SQL). TCL (BEGIN/COMMIT/ROLLBACK) is detected via AST when parse succeeds.
 func (p *PGTest) InterceptQuery(testID string, query string, connID ConnectionID) (string, error) {
 	queryTrimmed := strings.TrimSpace(query)
 	queryUpper := strings.ToUpper(queryTrimmed)
@@ -22,14 +25,28 @@ func (p *PGTest) InterceptQuery(testID string, query string, connID ConnectionID
 		return p.handlePGTestCommand(testID, queryTrimmed)
 	}
 
+	stmts, err := sql.ParseStatements(query)
+	if err == nil && len(stmts) > 0 && stmts[0].Stmt != nil {
+		stmt := stmts[0].Stmt
+		if sql.IsTransactionBegin(stmt) {
+			return p.handleBegin(testID, connID)
+		}
+		if sql.IsTransactionCommit(stmt) {
+			return p.handleCommit(testID)
+		}
+		if sql.IsTransactionRollback(stmt) {
+			return p.handleRollback(testID)
+		}
+		return query, nil
+	}
+
+	// Fallback when parse fails (e.g. malformed SQL)
 	if strings.HasPrefix(queryUpper, "BEGIN") {
 		return p.handleBegin(testID, connID)
 	}
-
 	if strings.HasPrefix(queryUpper, "COMMIT") {
 		return p.handleCommit(testID)
 	}
-
 	if strings.HasPrefix(queryUpper, "ROLLBACK") && !strings.Contains(queryUpper, "SAVEPOINT") {
 		return p.handleRollback(testID)
 	}

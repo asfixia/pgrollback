@@ -1,10 +1,10 @@
 package proxy
 
 import (
-	"fmt"
-	"strconv"
 	"strings"
 	"time"
+
+	sqlpkg "pgtest-sandbox/pkg/sql"
 )
 
 const maxQueryHistory = 100
@@ -22,19 +22,17 @@ type queryHistoryEntry struct {
 
 // isInternalNoiseQuery returns true for standard driver/internal queries we don't want in the GUI history.
 // - DEALLOCATE [name]: sent by many drivers after each prepared statement use (expected protocol cleanup).
-// - RELEASE SAVEPOINT pgtest_v_*: our internal savepoint release (TCL), not application logic.
 func isInternalNoiseQuery(query string) bool {
-	q := strings.ToUpper(strings.TrimSpace(query))
+	q := strings.TrimSpace(query)
 	if q == "" {
 		return true
 	}
-	uq := strings.ToUpper(q)
-	if strings.HasPrefix(uq, "DEALLOCATE") {
-		if len(uq) == 10 || uq[10] == ' ' || uq[10] == '\t' {
-			return true
-		}
+	stmts, err := sqlpkg.ParseStatements(q)
+	if err != nil || len(stmts) == 0 || stmts[0].Stmt == nil {
+		uq := strings.ToUpper(q)
+		return strings.HasPrefix(uq, "DEALLOCATE") && (len(uq) == 10 || (len(uq) > 10 && (uq[10] == ' ' || uq[10] == '\t')))
 	}
-	return false
+	return sqlpkg.IsDeallocateNoise(stmts[0].Stmt)
 }
 
 // SetLastQuery sets the last executed query and appends it to the session's query history (max maxQueryHistory).
@@ -54,55 +52,15 @@ func (d *realSessionDB) SetLastQuery(query string) {
 }
 
 // SetLastQueryWithParams stores the query with $1, $2, ... substituted by the given args (for extended protocol).
+// connLabel is optional (e.g. connection remote address) and is prepended in the stored query for GUI.
 // args are typically from bindParamsToArgs(params, formatCodes). If args is nil or empty, falls back to SetLastQuery(query).
-func (d *realSessionDB) SetLastQueryWithParams(query string, args []any) {
+func (d *realSessionDB) SetLastQueryWithParams(query string, args []any, connLabel string) {
 	if len(args) == 0 {
 		d.SetLastQuery(query)
 		return
 	}
-	resolved := substituteParams(query, args)
+	resolved := sqlpkg.SubstituteParams(query, args, connLabel)
 	d.SetLastQuery(resolved)
-}
-
-func substituteParams(query string, args []any) string {
-	for i := len(args) - 1; i >= 0; i-- {
-		literal := formatArgForSQL(args[i])
-		query = strings.ReplaceAll(query, "$"+strconv.Itoa(i+1), literal)
-	}
-	return query
-}
-
-func formatArgForSQL(v any) string {
-	if v == nil {
-		return "NULL"
-	}
-	switch x := v.(type) {
-	case int32:
-		return strconv.FormatInt(int64(x), 10)
-	case int64:
-		return strconv.FormatInt(x, 10)
-	case int:
-		return strconv.FormatInt(int64(x), 10)
-	case float64:
-		return strconv.FormatFloat(x, 'g', -1, 64)
-	case float32:
-		return strconv.FormatFloat(float64(x), 'g', -1, 32)
-	case bool:
-		if x {
-			return "true"
-		}
-		return "false"
-	case []byte:
-		return "'" + escapeSQLString(string(x)) + "'"
-	case string:
-		return "'" + escapeSQLString(x) + "'"
-	default:
-		return "'" + escapeSQLString(fmt.Sprint(v)) + "'"
-	}
-}
-
-func escapeSQLString(s string) string {
-	return strings.ReplaceAll(s, "'", "''")
 }
 
 // GetQueryHistory returns a copy of the last executed queries with timestamps (oldest first), at most maxQueryHistory.

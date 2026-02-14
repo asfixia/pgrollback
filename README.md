@@ -76,6 +76,16 @@ Why:
 
 ## Build and run
 
+### CGO and MinGW64 (Windows)
+
+This project uses **cgo** for the SQL parser (`github.com/pganalyze/pg_query_go/v5`). On Windows you need a **64‑bit MinGW** toolchain so that `go build` can compile the C parts.
+
+- **Install:** e.g. [MSYS2](https://www.msys2.org/) and then `pacman -S mingw-w64-x86_64-gcc` so that `C:\msys64\mingw64\bin` contains `x86_64-w64-mingw32-gcc.exe`.
+- **Configure:** Run **setEnvironments.bat** before building (it adds `C:\msys64\mingw64\bin` to `PATH` and sets `CC`/`CXX` and `CGO_ENABLED=1`). In Cursor/VS Code, the workspace settings (`.vscode/settings.json`) can inject this environment into the integrated terminal so new terminals are ready for `go build`.
+- **Verify:** In a terminal where the environment is set, run `where x86_64-w64-mingw32-gcc` and `go build ./pkg/sql/...`. The first cgo build may take 1–2 minutes.
+
+Without a 64‑bit MinGW `gcc`, you may see errors like `sorry, unimplemented: 64-bit mode not compiled in`.
+
 ### Go / Makefile (cross-platform)
 
 - **Build:** `go build -o bin/pgtest-sandbox ./cmd/pgtest` or `make build` (outputs `bin/pgtest-sandbox`).
@@ -83,7 +93,7 @@ Why:
 
 ### Windows .bat scripts
 
-- **setEnvironments.bat** — Sets up the Go environment (PATH, GOROOT, etc.). Other scripts call it before running Go. Run it first in a new shell if Go is not already on PATH.
+- **setEnvironments.bat** — Sets up the Go environment (PATH, GOROOT, **MinGW64 for cgo**) so that `go build` and tests can run. Run it in a new shell before building, or use the “Go+MinGW” terminal profile in Cursor so the integrated terminal gets the same environment.
 - **build.bat** — Calls `setEnvironments.bat`, then builds `bin\pgtest-sandbox.exe` with `-H windowsgui` (no console window; app lives in the system tray).
 - **run.bat** — Calls `setEnvironments.bat`, then runs `bin\pgtest-sandbox.exe`.
 

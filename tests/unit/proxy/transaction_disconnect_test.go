@@ -96,7 +96,8 @@ func TestOnlyOneConnectionMayHaveOpenTransaction(t *testing.T) {
 	if cfg == nil {
 		return
 	}
-	db2 := openDBToProxy(t, cfg, "pgtest_"+testID)
+	// Second connection must hit the same proxy server as db1 (proxyServer), not the package shared server
+	db2 := openDBToProxy(t, proxyServer.ListenHost(), proxyServer.ListenPort(), cfg, "pgtest_"+testID)
 	defer db2.Close()
 
 	// First connection: BEGIN must succeed.
@@ -157,11 +158,12 @@ func TestDisconnectWithoutCommitTableGone(t *testing.T) {
 	// Reconnect with the same testID and check that the table does not exist.
 	// The proxy serializes session backend use (LockBackend): db2's first query blocks
 	// until the disconnect defer has finished RollbackUserSavepointsOnDisconnect.
+	// Must connect to the same proxy server (proxyServer) as db1 was using
 	cfg := getConfigForProxyTest(t)
 	if cfg == nil {
 		return
 	}
-	db2 := openDBToProxy(t, cfg, "pgtest_"+testID)
+	db2 := openDBToProxy(t, proxyServer.ListenHost(), proxyServer.ListenPort(), cfg, "pgtest_"+testID)
 	defer db2.Close()
 
 	var exists bool

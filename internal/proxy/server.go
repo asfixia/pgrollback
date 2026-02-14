@@ -36,6 +36,8 @@ const (
 type Server struct {
 	Pgtest       *PGTest
 	listener     net.Listener
+	listenHost   string // actual bind host (set after Listen)
+	listenPort   int    // actual bind port (set after Listen; when 0 was requested, kernel assigns)
 	wg           sync.WaitGroup
 	startErr     error
 	mu           sync.RWMutex
@@ -44,6 +46,12 @@ type Server struct {
 	guiListener  *injectListener
 	guiHTTP      *http.Server
 }
+
+// ListenHost returns the host the server is bound to (e.g. "127.0.0.1").
+func (s *Server) ListenHost() string { s.mu.RLock(); defer s.mu.RUnlock(); return s.listenHost }
+
+// ListenPort returns the port the server is bound to. Useful when NewServer was called with port 0 (dynamic port).
+func (s *Server) ListenPort() int { s.mu.RLock(); defer s.mu.RUnlock(); return s.listenPort }
 
 // isPortInUse verifica se uma porta está em uso tentando conectar a ela
 func isPortInUse(host string, port int) bool {
@@ -58,16 +66,17 @@ func isPortInUse(host string, port int) bool {
 // NewServer cria uma nova instância do Server e inicia o servidor automaticamente
 // Retorna sempre o Server, mesmo se houver erro ao iniciar
 // Se listenHost for vazio, usa "localhost" como padrão
-// Se listenPort for 0, usa DefaultListenPort (5433) como padrão
+// Se listenPort for 0, binds to a dynamic port (use ListenPort() to get the actual port); otherwise uses DefaultListenPort (5433) when listenPort was not set by caller.
 // Se sessionTimeout for 0, usa DefaultSessionTimeout (24h) como padrão
-// Verifica se a porta está disponível antes de tentar iniciar o servidor
+// When listenPort > 0, verifica se a porta está disponível antes de tentar iniciar o servidor
 // Se houver erro ao iniciar, o erro é armazenado no Server e pode ser verificado com StartError()
 func NewServer(postgresHost string, postgresPort int, postgresDB, postgresUser, postgresPass string, timeout time.Duration, sessionTimeout time.Duration, keepaliveInterval time.Duration, listenHost string, listenPort int, withGUI bool) *Server {
 	// Usa valores padrão se não especificados
 	if sessionTimeout <= 0 {
 		sessionTimeout = DefaultSessionTimeout
 	}
-	if listenPort == 0 {
+	useDynamicPort := (listenPort == 0)
+	if !useDynamicPort && listenPort == 0 {
 		listenPort = DefaultListenPort
 	}
 	if listenHost == "" {
@@ -76,19 +85,23 @@ func NewServer(postgresHost string, postgresPort int, postgresDB, postgresUser, 
 
 	pgtest := NewPGTest(postgresHost, postgresPort, postgresDB, postgresUser, postgresPass, timeout, sessionTimeout, keepaliveInterval)
 	server := &Server{
-		Pgtest: pgtest,
+		Pgtest:     pgtest,
+		listenHost: listenHost,
+		listenPort: listenPort,
 	}
 
-	// Verifica se a porta já está em uso antes de tentar criar o listener
-	addr := fmt.Sprintf("%s:%d", listenHost, listenPort)
-	if isPortInUse(listenHost, listenPort) {
+	bindPort := listenPort
+	if useDynamicPort {
+		bindPort = 0
+	}
+	addr := fmt.Sprintf("%s:%d", listenHost, bindPort)
+	if !useDynamicPort && isPortInUse(listenHost, listenPort) {
 		server.mu.Lock()
 		server.startErr = fmt.Errorf("port %s:%d is already in use. Cannot start server. Please stop any service using this port", listenHost, listenPort)
 		server.mu.Unlock()
 		return server
 	}
 
-	// Tenta criar o listener para verificar erros imediatos
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		server.mu.Lock()
@@ -98,6 +111,16 @@ func NewServer(postgresHost string, postgresPort int, postgresDB, postgresUser, 
 	}
 
 	server.listener = listener
+	if useDynamicPort {
+		if tcpAddr, ok := listener.Addr().(*net.TCPAddr); ok {
+			server.mu.Lock()
+			server.listenPort = tcpAddr.Port
+			if tcpAddr.IP != nil && !tcpAddr.IP.IsUnspecified() {
+				server.listenHost = tcpAddr.IP.String()
+			}
+			server.mu.Unlock()
+		}
+	}
 
 	if withGUI {
 		server.guiCh = make(chan net.Conn, 32)
@@ -110,18 +133,18 @@ func NewServer(postgresHost string, postgresPort int, postgresDB, postgresUser, 
 		}()
 	}
 
-	// Inicia o loop de aceitação de conexões em uma goroutine
 	go server.acceptConnections()
 
-	// Aguarda o servidor estar realmente escutando antes de retornar
-	if !server.waitUntilListening(listenHost, listenPort) {
+	actualHost := server.ListenHost()
+	actualPort := server.ListenPort()
+	if !server.waitUntilListening(actualHost, actualPort) {
 		server.mu.Lock()
-		server.startErr = fmt.Errorf("server failed to start listening on %s after %d attempts", addr, serverStartupCheckAttempts)
+		server.startErr = fmt.Errorf("server failed to start listening on %s:%d after %d attempts", actualHost, actualPort, serverStartupCheckAttempts)
 		server.mu.Unlock()
 		return server
 	}
 
-	logIfVerbose("PGTest server listening on %s", addr)
+	logIfVerbose("PGTest server listening on %s:%d", actualHost, actualPort)
 	return server
 }
 

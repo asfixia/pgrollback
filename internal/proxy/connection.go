@@ -8,33 +8,19 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"unicode"
 	"unsafe"
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
+
+	"pgtest-sandbox/pkg/sql"
 )
 
 // ErrNoOpenUserTransaction is returned when COMMIT or ROLLBACK is executed but there is no open user transaction on this connection.
 var ErrNoOpenUserTransaction = errors.New("there is no open transaction on this connection")
 
 const pgtestSavepointPrefix = "pgtest_v_"
-
-// extractSavepointNameFromQuery returns the first pgtest_v_* savepoint name in query, or "" if none.
-// Used to ensure we only apply TCL tracking when the query refers to the session's expected savepoint.
-func extractSavepointNameFromQuery(query string) string {
-	i := strings.Index(query, pgtestSavepointPrefix)
-	if i < 0 {
-		return ""
-	}
-	start := i
-	i += len(pgtestSavepointPrefix)
-	for i < len(query) && unicode.IsDigit(rune(query[i])) {
-		i++
-	}
-	return query[start:i]
-}
 
 // PrintR é uma função utilitária similar ao print_r do PHP
 // Imprime estruturas de dados de forma legível para debugging
@@ -116,39 +102,6 @@ func (p *proxyConnection) backendStmtName(clientName string) string {
 	return fmt.Sprintf("c%d_%s", p.connectionID(), clientName)
 }
 
-// stripSQLCommentsForDEALLOCATE removes SQL comments from s so we can parse
-// "DEALLOCATE /**/ ALL" or "DEALLOCATE  -- comment\n ALL" as DEALLOCATE ALL.
-// Removes -- to end of line and /* */ blocks; replaced with space to avoid gluing tokens.
-func stripSQLCommentsForDEALLOCATE(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	i := 0
-	for i < len(s) {
-		if i+2 <= len(s) && s[i:i+2] == "--" {
-			for i < len(s) && s[i] != '\n' {
-				b.WriteByte(' ')
-				i++
-			}
-			continue
-		}
-		if i+2 <= len(s) && s[i:i+2] == "/*" {
-			b.WriteByte(' ')
-			b.WriteByte(' ')
-			i += 2
-			for i+1 < len(s) && s[i:i+2] != "*/" {
-				i++
-			}
-			if i+2 <= len(s) {
-				i += 2
-			}
-			continue
-		}
-		b.WriteByte(s[i])
-		i++
-	}
-	return b.String()
-}
-
 // rewriteDEALLOCATEForBackend rewrites a DEALLOCATE simple-query so the backend sees
 // this connection's prefixed statement names. Multiple client connections (same testID)
 // share one backend connection but each uses its own prefix; forwarding "DEALLOCATE pdo_stmt_00000003"
@@ -156,31 +109,30 @@ func stripSQLCommentsForDEALLOCATE(s string) string {
 // Returns (rewritten commands, true) if query was DEALLOCATE; otherwise (nil, false).
 // For "DEALLOCATE name" returns one command with backend name. For "DEALLOCATE ALL" returns
 // one DEALLOCATE per prepared statement owned by this connection (or ["SELECT 1"] if none).
-// Parsing strips SQL comments (-- and /* */) so "DEALLOCATE /**/ ALL" is treated as DEALLOCATE ALL.
+// Uses AST (sql.ParseDeallocate) so comments are handled by the PG parser.
 func (p *proxyConnection) rewriteDEALLOCATEForBackend(query string) (rewritten []string, isDEALLOCATE bool) {
-	q := strings.TrimSpace(query)
-	const deallocatePrefix = "DEALLOCATE"
-	uq := strings.ToUpper(q)
-	if len(uq) < len(deallocatePrefix) || uq[:len(deallocatePrefix)] != deallocatePrefix {
+	stmts, err := sql.ParseStatements(query)
+	if err != nil || len(stmts) == 0 || stmts[0].Stmt == nil {
 		return nil, false
 	}
-	rest := q[len(deallocatePrefix):]
-	rest = strings.TrimSpace(stripSQLCommentsForDEALLOCATE(rest))
-	rest = strings.TrimSpace(rest)
-	if rest == "" || strings.ToUpper(rest) == "ALL" {
+	name, isAll, ok := sql.ParseDeallocate(stmts[0].Stmt)
+	if !ok {
+		return nil, false
+	}
+	if isAll {
 		names := p.copyPreparedStatementNames()
-		for _, name := range names {
-			if p.IsMultiStatement(name) {
+		for _, n := range names {
+			if p.IsMultiStatement(n) {
 				continue
 			}
-			rewritten = append(rewritten, "DEALLOCATE "+p.backendStmtName(name))
+			rewritten = append(rewritten, "DEALLOCATE "+p.backendStmtName(n))
 		}
 		if len(rewritten) == 0 {
 			rewritten = []string{"SELECT 1"}
 		}
 		return rewritten, true
 	}
-	return []string{"DEALLOCATE " + p.backendStmtName(rest)}, true
+	return []string{"DEALLOCATE " + p.backendStmtName(name)}, true
 }
 
 // SetPreparedStatement stores the intercepted query for the given statement name (Extended Query).
@@ -406,100 +358,101 @@ func (p *proxyConnection) getUserOpenTransactionCountLocked() int {
 
 // ApplyTCLSuccessTracking is called only after a TCL command (SAVEPOINT/RELEASE/ROLLBACK TO) has been successfully executed.
 // It updates session SavepointLevel (increment on SAVEPOINT), per-connection user transaction count, and releases the
-// session claim when the connection's count drops to zero. Returns ErrNoOpenUserTransaction if COMMIT/ROLLBACK is applied with count already 0.
+// session claim when the connection's count drops to zero. Applies to every statement in the query (e.g. "ROLLBACK TO ...; RELEASE ...").
 func (p *proxyConnection) ApplyTCLSuccessTracking(query string, session *TestSession) error {
 	if session == nil || session.DB == nil {
 		return nil
 	}
-	trimmed := strings.TrimSpace(query)
-	savepointName := extractSavepointNameFromQuery(trimmed)
-	if savepointName == "" {
+	stmts, err := sql.ParseStatements(query)
+	if err != nil || len(stmts) == 0 {
 		return nil
 	}
-
-	// User BEGIN -> SAVEPOINT pgtest_v_N: only apply if the name matches the session's expected next (GetNextSavepointName).
-	if strings.HasPrefix(trimmed, "SAVEPOINT "+pgtestSavepointPrefix) {
-		if savepointName != session.DB.GetNextSavepointName() {
-			return nil
+	for _, raw := range stmts {
+		stmt := raw.Stmt
+		if stmt == nil {
+			continue
 		}
-		session.DB.IncrementSavepointLevel()
-		p.IncrementUserOpenTransactionCount()
-		return nil
-	}
-
-	// User ROLLBACK -> "ROLLBACK TO SAVEPOINT pgtest_v_N; RELEASE SAVEPOINT pgtest_v_N": name must match current (GetSavepointName); then decrement level only now (after successful execution).
-	if strings.Contains(query, "ROLLBACK TO SAVEPOINT "+pgtestSavepointPrefix) {
-		if savepointName != session.DB.GetSavepointName() {
-			return nil
+		savepointName := sql.GetSavepointName(stmt)
+		if savepointName == "" || !strings.HasPrefix(savepointName, pgtestSavepointPrefix) {
+			continue
 		}
-		//if err := p.DecrementUserOpenTransactionCount(); err != nil {
-		//	return err
-		//}
-		//session.DB.DecrementSavepointLevel()
-		//if p.GetUserOpenTransactionCount() == 0 {
-		//	session.DB.ReleaseOpenTransaction(p.connectionID(), "")
-		//}
-		return nil
-	}
-
-	// User COMMIT -> "RELEASE SAVEPOINT pgtest_v_N": same as above.
-	if strings.HasPrefix(trimmed, "RELEASE SAVEPOINT "+pgtestSavepointPrefix) {
-		if savepointName != session.DB.GetSavepointName() {
-			return nil
+		if sql.IsSavepoint(stmt) {
+			if savepointName != session.DB.GetNextSavepointName() {
+				continue
+			}
+			session.DB.IncrementSavepointLevel()
+			p.IncrementUserOpenTransactionCount()
+			continue
 		}
-		if err := p.DecrementUserOpenTransactionCount(); err != nil {
-			return err
+		if sql.IsRollbackToSavepoint(stmt) {
+			if savepointName != session.DB.GetSavepointName() {
+				continue
+			}
+			continue
 		}
-		session.DB.decrementSavepointLevelLocked()
-		if p.getUserOpenTransactionCountLocked() == 0 {
-			session.DB.releaseOpenTransactionLocked(p.connectionID())
+		if sql.IsReleaseSavepoint(stmt) {
+			if savepointName != session.DB.GetSavepointName() {
+				continue
+			}
+			if err := p.DecrementUserOpenTransactionCount(); err != nil {
+				return err
+			}
+			session.DB.decrementSavepointLevelLocked()
+			if p.getUserOpenTransactionCountLocked() == 0 {
+				session.DB.releaseOpenTransactionLocked(p.connectionID())
+			}
+			continue
 		}
-		return nil
 	}
 	return nil
 }
 
-// ApplyTCLSuccessTrackingLocked is like ApplyTCLSuccessTracking but uses only session.DB methods that do not acquire d.mu
-// (getSavepointNameLocked, getNextSavepointNameLocked, incrementSavepointLevelLocked, decrementSavepointLevelLocked,
-// releaseOpenTransactionLocked). Call only while the caller holds session.DB's lock (e.g. LockRun).
+// ApplyTCLSuccessTrackingLocked is like ApplyTCLSuccessTracking but uses only session.DB methods that do not acquire d.mu.
+// Applies to every statement in the query. Call only while the caller holds session.DB's lock (e.g. LockRun).
 func (p *proxyConnection) ApplyTCLSuccessTrackingLocked(query string, session *TestSession) error {
 	if session == nil || session.DB == nil {
 		return nil
 	}
-	trimmed := strings.TrimSpace(query)
-	savepointName := extractSavepointNameFromQuery(trimmed)
-	if savepointName == "" {
+	stmts, err := sql.ParseStatements(query)
+	if err != nil || len(stmts) == 0 {
 		return nil
 	}
-
-	if strings.HasPrefix(trimmed, "SAVEPOINT "+pgtestSavepointPrefix) {
-		if savepointName != session.DB.getNextSavepointNameLocked() {
-			return nil
+	for _, raw := range stmts {
+		stmt := raw.Stmt
+		if stmt == nil {
+			continue
 		}
-		session.DB.incrementSavepointLevelLocked()
-		p.IncrementUserOpenTransactionCount()
-		return nil
-	}
-
-	if strings.Contains(query, "ROLLBACK TO SAVEPOINT "+pgtestSavepointPrefix) {
-		if savepointName != session.DB.getSavepointNameLocked() {
-			return nil
+		savepointName := sql.GetSavepointName(stmt)
+		if savepointName == "" || !strings.HasPrefix(savepointName, pgtestSavepointPrefix) {
+			continue
 		}
-		return nil
-	}
-
-	if strings.HasPrefix(trimmed, "RELEASE SAVEPOINT "+pgtestSavepointPrefix) {
-		if savepointName != session.DB.getSavepointNameLocked() {
-			return nil
+		if sql.IsSavepoint(stmt) {
+			if savepointName != session.DB.getNextSavepointNameLocked() {
+				continue
+			}
+			session.DB.incrementSavepointLevelLocked()
+			p.IncrementUserOpenTransactionCount()
+			continue
 		}
-		if err := p.DecrementUserOpenTransactionCount(); err != nil {
-			return err
+		if sql.IsRollbackToSavepoint(stmt) {
+			if savepointName != session.DB.getSavepointNameLocked() {
+				continue
+			}
+			continue
 		}
-		session.DB.decrementSavepointLevelLocked()
-		if p.getUserOpenTransactionCountLocked() == 0 {
-			session.DB.releaseOpenTransactionLocked(p.connectionID())
+		if sql.IsReleaseSavepoint(stmt) {
+			if savepointName != session.DB.getSavepointNameLocked() {
+				continue
+			}
+			if err := p.DecrementUserOpenTransactionCount(); err != nil {
+				return err
+			}
+			session.DB.decrementSavepointLevelLocked()
+			if p.getUserOpenTransactionCountLocked() == 0 {
+				session.DB.releaseOpenTransactionLocked(p.connectionID())
+			}
+			continue
 		}
-		return nil
 	}
 	return nil
 }

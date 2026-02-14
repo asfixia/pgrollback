@@ -35,14 +35,11 @@ func TestMain(m *testing.M) {
 		code := m.Run()
 		os.Exit(code)
 	}
-	port := cfg.Proxy.ListenPort
-	if port <= 0 {
-		port = 5433
-	}
 	host := cfg.Proxy.ListenHost
 	if host == "" || host == "localhost" {
 		host = "127.0.0.1" // use IPv4 so client and server match on Windows
 	}
+	// Use port 0 so the OS assigns a free port (avoids "port already in use" when multiple test runs or integration left 5433 open)
 	proxyTestServer = proxy.NewServer(
 		cfg.Postgres.Host,
 		cfg.Postgres.Port,
@@ -53,7 +50,7 @@ func TestMain(m *testing.M) {
 		cfg.Postgres.SessionTimeout.Duration,
 		0,
 		host,
-		port,
+		0,
 		false,
 	)
 	if err := proxyTestServer.StartError(); err != nil {
@@ -62,7 +59,7 @@ func TestMain(m *testing.M) {
 	}
 	// Wait until the proxy is accepting connections (avoids connection refused in first tests)
 	for i := 0; i < 50; i++ {
-		if isPortInUse(host, port) {
+		if isPortInUse(proxyTestServer.ListenHost(), proxyTestServer.ListenPort()) {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -93,7 +90,11 @@ func connectToRunningProxyWithAppName(t *testing.T, applicationName string) *sql
 	if cfg == nil {
 		return nil
 	}
-	dsn := buildDSN(cfg.Proxy.ListenHost, cfg.Proxy.ListenPort, cfg.Postgres.Database, cfg.Postgres.User, cfg.Postgres.Password, applicationName)
+	if proxyTestServer == nil {
+		t.Fatalf("No shared proxy server (PGTEST_USE_EXTERNAL_SERVER mode must use openDBToProxy with explicit host/port)")
+		return nil
+	}
+	dsn := buildDSN(proxyTestServer.ListenHost(), proxyTestServer.ListenPort(), cfg.Postgres.Database, cfg.Postgres.User, cfg.Postgres.Password, applicationName)
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatalf("Failed to open connection to proxy: %v", err)
@@ -108,10 +109,26 @@ func connectToRunningProxy(t *testing.T, testID string) *sql.DB {
 	return connectToRunningProxyWithAppName(t, "pgtest_"+testID)
 }
 
-// openDBToProxy opens a database connection to the proxy at cfg.Proxy host:port with the given applicationName.
-func openDBToProxy(t *testing.T, cfg *config.Config, applicationName string) *sql.DB {
+// proxyHostPort returns the host and port of the shared proxy server, or from cfg when using PGPTEST_USE_EXTERNAL_SERVER.
+func proxyHostPort(cfg *config.Config) (host string, port int) {
+	if proxyTestServer != nil {
+		return proxyTestServer.ListenHost(), proxyTestServer.ListenPort()
+	}
+	host = cfg.Proxy.ListenHost
+	if host == "" || host == "localhost" {
+		host = "127.0.0.1"
+	}
+	port = cfg.Proxy.ListenPort
+	if port <= 0 {
+		port = 5433
+	}
+	return host, port
+}
+
+// openDBToProxy opens a database connection to the proxy at host:port with the given applicationName.
+func openDBToProxy(t *testing.T, host string, port int, cfg *config.Config, applicationName string) *sql.DB {
 	t.Helper()
-	dsn := buildDSN(cfg.Proxy.ListenHost, cfg.Proxy.ListenPort, cfg.Postgres.Database, cfg.Postgres.User, cfg.Postgres.Password, applicationName)
+	dsn := buildDSN(host, port, cfg.Postgres.Database, cfg.Postgres.User, cfg.Postgres.Password, applicationName)
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatalf("Failed to open connection to proxy: %v", err)
@@ -128,6 +145,10 @@ func connectToProxyForTest(t *testing.T, testID string) (*sql.DB, context.Contex
 	if cfg == nil {
 		return nil, nil, func() {}
 	}
+	host := cfg.Proxy.ListenHost
+	if host == "" || host == "localhost" {
+		host = "127.0.0.1"
+	}
 	proxyServer := proxy.NewServer(
 		cfg.Postgres.Host,
 		cfg.Postgres.Port,
@@ -137,14 +158,14 @@ func connectToProxyForTest(t *testing.T, testID string) (*sql.DB, context.Contex
 		cfg.Proxy.Timeout,
 		cfg.Postgres.SessionTimeout.Duration,
 		0,
-		cfg.Proxy.ListenHost,
-		cfg.Proxy.ListenPort,
+		host,
+		0, // dynamic port to avoid conflicts
 		false,
 	)
 	if err := proxyServer.StartError(); err != nil {
 		t.Fatalf("Failed to start proxy server: %v", err)
 	}
-	db := openDBToProxy(t, cfg, "pgtest_"+testID)
+	db := openDBToProxy(t, proxyServer.ListenHost(), proxyServer.ListenPort(), cfg, "pgtest_"+testID)
 	if db == nil {
 		return nil, nil, func() {}
 	}
@@ -164,6 +185,10 @@ func connectToProxyForTestWithAppName(t *testing.T, applicationName string) (*sq
 	if cfg == nil {
 		return nil, nil, func() {}
 	}
+	host := cfg.Proxy.ListenHost
+	if host == "" || host == "localhost" {
+		host = "127.0.0.1"
+	}
 	proxyServer := proxy.NewServer(
 		cfg.Postgres.Host,
 		cfg.Postgres.Port,
@@ -173,14 +198,14 @@ func connectToProxyForTestWithAppName(t *testing.T, applicationName string) (*sq
 		cfg.Proxy.Timeout,
 		cfg.Postgres.SessionTimeout.Duration,
 		0,
-		cfg.Proxy.ListenHost,
-		cfg.Proxy.ListenPort,
+		host,
+		0, // dynamic port
 		false,
 	)
 	if err := proxyServer.StartError(); err != nil {
 		t.Fatalf("Failed to start proxy server: %v", err)
 	}
-	db := openDBToProxy(t, cfg, applicationName)
+	db := openDBToProxy(t, proxyServer.ListenHost(), proxyServer.ListenPort(), cfg, applicationName)
 	if db == nil {
 		return nil, nil, func() {}
 	}
@@ -200,6 +225,10 @@ func connectToProxyForTestWithServer(t *testing.T, testID string) (*sql.DB, cont
 	if cfg == nil {
 		return nil, nil, nil, func() {}
 	}
+	host := cfg.Proxy.ListenHost
+	if host == "" || host == "localhost" {
+		host = "127.0.0.1"
+	}
 	proxyServer := proxy.NewServer(
 		cfg.Postgres.Host,
 		cfg.Postgres.Port,
@@ -209,14 +238,14 @@ func connectToProxyForTestWithServer(t *testing.T, testID string) (*sql.DB, cont
 		cfg.Proxy.Timeout,
 		cfg.Postgres.SessionTimeout.Duration,
 		0,
-		cfg.Proxy.ListenHost,
-		cfg.Proxy.ListenPort,
+		host,
+		0,
 		false,
 	)
 	if err := proxyServer.StartError(); err != nil {
 		t.Fatalf("Failed to start proxy server: %v", err)
 	}
-	db := openDBToProxy(t, cfg, "pgtest_"+testID)
+	db := openDBToProxy(t, proxyServer.ListenHost(), proxyServer.ListenPort(), cfg, "pgtest_"+testID)
 	if db == nil {
 		return nil, nil, nil, func() {}
 	}
@@ -236,6 +265,10 @@ func connectToProxyForTestWithAppNameAndServer(t *testing.T, applicationName str
 	if cfg == nil {
 		return nil, nil, nil, func() {}
 	}
+	host := cfg.Proxy.ListenHost
+	if host == "" || host == "localhost" {
+		host = "127.0.0.1"
+	}
 	proxyServer := proxy.NewServer(
 		cfg.Postgres.Host,
 		cfg.Postgres.Port,
@@ -245,14 +278,14 @@ func connectToProxyForTestWithAppNameAndServer(t *testing.T, applicationName str
 		cfg.Proxy.Timeout,
 		cfg.Postgres.SessionTimeout.Duration,
 		0,
-		cfg.Proxy.ListenHost,
-		cfg.Proxy.ListenPort,
+		host,
+		0,
 		false,
 	)
 	if err := proxyServer.StartError(); err != nil {
 		t.Fatalf("Failed to start proxy server: %v", err)
 	}
-	db := openDBToProxy(t, cfg, applicationName)
+	db := openDBToProxy(t, proxyServer.ListenHost(), proxyServer.ListenPort(), cfg, applicationName)
 	if db == nil {
 		return nil, nil, nil, func() {}
 	}
@@ -417,7 +450,7 @@ func QueryContextLastResult(t *testing.T, db *sql.DB, ctx context.Context, query
 	}
 
 	// Last result = last statement in the query; run only it to get its result (empty or not)
-	commands := sqlpkg.SplitCommands(query)
+	commands := sqlpkg.SplitCommandsFallback(query)
 	if len(commands) == 0 {
 		return nil, fmt.Errorf("query has no commands")
 	}

@@ -4,6 +4,21 @@ import (
 	"testing"
 )
 
+func TestSplitCommandsFallback_RespectsQuotes(t *testing.T) {
+	// Semicolons inside single-quoted strings must not split (e.g. pgAdmin SET client_encoding='utf-8')
+	query := `SET client_encoding='utf-8'; SELECT 1 as um`
+	commands := SplitCommandsFallback(query)
+	if len(commands) != 2 {
+		t.Fatalf("SplitCommandsFallback: got %d commands, want 2 (semicolon inside 'utf-8' must not split)", len(commands))
+	}
+	if commands[0] != "SET client_encoding='utf-8'" {
+		t.Errorf("first command = %q, want SET client_encoding='utf-8'", commands[0])
+	}
+	if commands[1] != "SELECT 1 as um" {
+		t.Errorf("second command = %q, want SELECT 1 as um", commands[1])
+	}
+}
+
 func TestReturningColumns(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -60,9 +75,9 @@ func TestReturningColumns(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cols := ReturningColumns(tt.query)
+			cols := ReturningColumnsFallback(tt.query)
 			if len(cols) != tt.wantNum {
-				t.Errorf("ReturningColumns() len = %d, want %d", len(cols), tt.wantNum)
+				t.Errorf("ReturningColumnsFallback() len = %d, want %d", len(cols), tt.wantNum)
 				return
 			}
 			if tt.wantNum > 0 {
@@ -78,7 +93,7 @@ func TestReturningColumns(t *testing.T) {
 }
 
 func TestReturningColumnsTwoColumns(t *testing.T) {
-	cols := ReturningColumns(`INSERT INTO t (a, b) VALUES ($1, $2) RETURNING "id", "name"`)
+	cols := ReturningColumnsFallback(`INSERT INTO t (a, b) VALUES ($1, $2) RETURNING "id", "name"`)
 	if len(cols) != 2 {
 		t.Fatalf("want 2 columns, got %d", len(cols))
 	}

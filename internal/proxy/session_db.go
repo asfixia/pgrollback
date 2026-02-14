@@ -11,6 +11,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	sqlpkg "pgtest-sandbox/pkg/sql"
 )
 
 // ConnectionID is an opaque identifier for a proxy connection, used to allow
@@ -133,12 +135,20 @@ func (d *realSessionDB) isTransactionHeldByOtherConnection(connID ConnectionID) 
 // IsUserBeginQuery returns true when the query is a user BEGIN (SAVEPOINT pgtest_v_*).
 // Callers use this to decide whether to call ClaimOpenTransaction (e.g. before executing TCL).
 func IsUserBeginQuery(query string) bool {
-	return strings.HasPrefix(strings.TrimSpace(query), "SAVEPOINT pgtest_v_")
+	stmts, err := sqlpkg.ParseStatements(query)
+	if err != nil || len(stmts) == 0 || stmts[0].Stmt == nil {
+		return false
+	}
+	return sqlpkg.IsSavepoint(stmts[0].Stmt) && strings.HasPrefix(sqlpkg.GetSavepointName(stmts[0].Stmt), pgtestSavepointPrefix)
 }
 
 // isUserReleaseQuery returns true when the query is a user COMMIT (RELEASE SAVEPOINT pgtest_v_*).
 func isUserReleaseQuery(query string) bool {
-	return strings.HasPrefix(strings.TrimSpace(query), "RELEASE SAVEPOINT pgtest_v_")
+	stmts, err := sqlpkg.ParseStatements(query)
+	if err != nil || len(stmts) == 0 || stmts[0].Stmt == nil {
+		return false
+	}
+	return sqlpkg.IsReleaseSavepoint(stmts[0].Stmt) && strings.HasPrefix(sqlpkg.GetSavepointName(stmts[0].Stmt), pgtestSavepointPrefix)
 }
 
 // IsQueryThatAffectsClaim returns true when the query is one that claimed (BEGIN) or that would release (COMMIT).
@@ -529,19 +539,25 @@ func (d *realSessionDB) SafeExecTCL(ctx context.Context, sql string, args ...any
 }
 
 // isSavepointCommand returns true for SAVEPOINT <name>. Those must run on the main tx.
-func isSavepointCommand(sql string) bool {
-	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(sql)), "SAVEPOINT ")
+func isSavepointCommand(query string) bool {
+	stmts, err := sqlpkg.ParseStatements(query)
+	if err != nil || len(stmts) == 0 || stmts[0].Stmt == nil {
+		return false
+	}
+	return sqlpkg.IsSavepoint(stmts[0].Stmt)
 }
 
 // commandInvalidatesGuardOnSuccess returns true when the command's success invalidates the guard
 // (we must not call Commit()). ROLLBACK/ROLLBACK TO SAVEPOINT roll back past the guard;
 // RELEASE SAVEPOINT releases a savepoint that was created before the guard, which can merge
 // the guard's scope and leave the guard non-existent.
-func commandInvalidatesGuardOnSuccess(sql string) bool {
-	s := strings.ToUpper(strings.TrimSpace(sql))
-	return s == "ROLLBACK" ||
-		strings.HasPrefix(s, "ROLLBACK TO SAVEPOINT") ||
-		strings.HasPrefix(s, "RELEASE SAVEPOINT")
+func commandInvalidatesGuardOnSuccess(query string) bool {
+	stmts, err := sqlpkg.ParseStatements(query)
+	if err != nil || len(stmts) == 0 || stmts[0].Stmt == nil {
+		return false
+	}
+	stmt := stmts[0].Stmt
+	return sqlpkg.IsTransactionRollback(stmt) || sqlpkg.IsRollbackToSavepoint(stmt) || sqlpkg.IsReleaseSavepoint(stmt)
 }
 
 // RollbackUserSavepointsOnDisconnect rolls back the given number of user-opened savepoints

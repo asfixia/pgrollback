@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"regexp"
-	"strconv"
 	"strings"
+
+	pg_query "github.com/pganalyze/pg_query_go/v5"
 
 	"pgtest-sandbox/pkg/protocol"
 	"pgtest-sandbox/pkg/sql"
@@ -22,10 +22,34 @@ import (
 // on Describe (e.g. PHP PDO / Laravel Eloquent) need this so they get the correct result shape and
 // do not receive an empty result set. Returns nil if the query does not return rows or we cannot parse RETURNING.
 func DescribeRowFieldsForQuery(query string) []pgproto3.FieldDescription {
-	if query == "" || !sql.ReturnsResultSet(query) {
+	if query == "" {
 		return nil
 	}
-	cols := sql.ReturningColumns(query)
+	var stmt *pg_query.Node
+	if stmts, err := sql.ParseStatements(query); err == nil && len(stmts) > 0 {
+		stmt = stmts[0].Stmt
+	}
+	if stmt != nil {
+		if !sql.StmtReturnsResultSet(stmt) {
+			return nil
+		}
+		cols := sql.GetReturningColumns(stmt)
+		if len(cols) == 0 {
+			return nil
+		}
+		names := make([]string, len(cols))
+		oids := make([]uint32, len(cols))
+		for i, c := range cols {
+			names[i] = c.Name
+			oids[i] = c.OID
+		}
+		return protocol.FieldDescriptionsFromNamesAndOIDs(names, oids)
+	}
+	// Fallback when parse fails
+	if !sql.ReturnsResultSetFallback(query) {
+		return nil
+	}
+	cols := sql.ReturningColumnsFallback(query)
 	if len(cols) == 0 {
 		return nil
 	}
@@ -40,16 +64,11 @@ func DescribeRowFieldsForQuery(query string) []pgproto3.FieldDescription {
 
 // maxParameterIndex returns the maximum $n placeholder index in query (e.g. $1 $2 $1 -> 2). Returns 0 if none.
 func maxParameterIndex(query string) int {
-	re := regexp.MustCompile(`\$([0-9]+)`)
-	max := 0
-	for _, m := range re.FindAllStringSubmatch(query, -1) {
-		if len(m) >= 2 {
-			if n, err := strconv.Atoi(m[1]); err == nil && n > max {
-				max = n
-			}
-		}
+	stmts, err := sql.ParseStatements(query)
+	if err != nil || len(stmts) == 0 || stmts[0].Stmt == nil {
+		return 0
 	}
-	return max
+	return sql.MaxParamIndex(stmts[0].Stmt)
 }
 
 // pgconnFieldToProto converts a pgconn.FieldDescription to a pgproto3.FieldDescription.
@@ -274,11 +293,28 @@ func (p *proxyConnection) handleMessageExecute(testID string, msg *pgproto3.Exec
 	}
 	if query != "" && session.DB != nil {
 		args := bindParamsToArgs(params, formatCodes)
-		session.DB.SetLastQueryWithParams(query, args)
+		connLabel := ""
+		if p.clientConn != nil {
+			connLabel = p.clientConn.RemoteAddr().String()
+		}
+		session.DB.SetLastQueryWithParams(query, args, connLabel)
 	}
 	if p.IsMultiStatement(stmtName) {
 		// Run as batch and send only the last result (same behavior as Simple Query multi-statement).
-		commands := sql.SplitCommands(query)
+		var commands []string
+		if stmts, err := sql.ParseStatements(query); err == nil && len(stmts) > 0 {
+			if len(stmts) > 1 {
+				// Use quote-aware split so we don't cut inside e.g. SET client_encoding='utf-8'
+				commands = sql.SplitCommandsFallback(query)
+			} else {
+				if c := sql.CommandStringFromRaw(query, stmts[0]); c != "" {
+					commands = []string{c}
+				}
+			}
+		}
+		if len(commands) == 0 {
+			commands = sql.SplitCommandsFallback(query)
+		}
 		if err := p.SafeForwardMultipleCommandsToDB(testID, commands, false); err != nil {
 			log.Printf("[PROXY] multi-statement Execute failed: %v", err)
 			p.SendErrorResponse(err)
@@ -325,8 +361,13 @@ func (p *proxyConnection) handleMessageParse(testID string, msg *pgproto3.Parse)
 	if session.DB != nil {
 		session.DB.SetPreparedStatement(msg.Name, interceptedQuery) // GUI/history
 	}
-	commands := sql.SplitCommands(interceptedQuery)
-	if len(commands) > 1 {
+	var numStmts int
+	if stmts, err := sql.ParseStatements(interceptedQuery); err == nil {
+		numStmts = len(stmts)
+	} else {
+		numStmts = len(sql.SplitCommandsFallback(interceptedQuery))
+	}
+	if numStmts > 1 {
 		// PostgreSQL does not allow multiple commands in a prepared statement. Run as batch on Execute.
 		p.SetMultiStatement(msg.Name)
 		p.backend.Send(&pgproto3.ParseComplete{})

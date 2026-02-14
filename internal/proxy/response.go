@@ -19,15 +19,23 @@ func (p *proxyConnection) SendSelectResults(rows pgx.Rows) error {
 	return p.SendSelectResultsWithQuery(rows, "")
 }
 
-// SendSelectResultsWithQuery envia resultados; se query tiver RETURNING, usa o mesmo RowDescription
-// sintético do Describe para que clientes (ex.: PHP PDO) que dependem da consistência recebam a linha.
-func (p *proxyConnection) SendSelectResultsWithQuery(rows pgx.Rows, query string) error {
-	var fields []pgproto3.FieldDescription
-	var returnOIDs []uint32 // when set, we use synthetic RowDescription (Format 0) and must send text values
-	returnsSet := query != "" && sql.ReturnsResultSet(query)
-	cols := sql.ReturningColumns(query)
+// resolveFieldDescriptions determines the RowDescription fields and optional return OIDs
+// for a query result. It parses the query to detect RETURNING clauses and builds synthetic
+// field descriptions when needed; otherwise falls back to the backend's FieldDescriptions.
+func resolveFieldDescriptions(query string, rows pgx.Rows) (fields []pgproto3.FieldDescription, returnOIDs []uint32, returnsSet bool) {
+	var cols []sql.ReturningColumn
+	if query != "" {
+		if stmts, err := sql.ParseStatements(query); err == nil && len(stmts) > 0 && stmts[0].Stmt != nil {
+			stmt := stmts[0].Stmt
+			returnsSet = sql.StmtReturnsResultSet(stmt)
+			cols = sql.GetReturningColumns(stmt)
+		} else {
+			returnsSet = sql.ReturnsResultSetFallback(query)
+			cols = sql.ReturningColumnsFallback(query)
+		}
+	}
 	if returnsSet && len(cols) > 0 {
-		// Use synthetic RowDescription (name, type, Format 0) so client gets consistent result; convert row values to text below.
+		// Use synthetic RowDescription (name, type, Format 0) so client gets consistent result.
 		names := make([]string, len(cols))
 		oids := make([]uint32, len(cols))
 		for i, c := range cols {
@@ -56,6 +64,13 @@ func (p *proxyConnection) SendSelectResultsWithQuery(rows pgx.Rows, query string
 			fields = protocol.ConvertFieldDescriptions(fieldDescs)
 		}
 	}
+	return fields, returnOIDs, returnsSet
+}
+
+// SendSelectResultsWithQuery envia resultados; se query tiver RETURNING, usa o mesmo RowDescription
+// sintético do Describe para que clientes (ex.: PHP PDO) que dependem da consistência recebam a linha.
+func (p *proxyConnection) SendSelectResultsWithQuery(rows pgx.Rows, query string) error {
+	fields, returnOIDs, returnsSet := resolveFieldDescriptions(query, rows)
 	if os.Getenv("PGTEST_LOG_MESSAGE_ORDER") == "1" {
 		log.Printf("[MSG_ORDER] SEND RowDescription: %d cols", len(fields))
 	}
@@ -79,7 +94,7 @@ func (p *proxyConnection) SendSelectResultsWithQuery(rows pgx.Rows, query string
 		}
 		p.backend.Send(&pgproto3.DataRow{Values: rawValues})
 	}
-	if query != "" && sql.ReturnsResultSet(query) && rowCount == 0 {
+	if query != "" && returnsSet && rowCount == 0 {
 		preview := strings.TrimSpace(query)
 		if len(preview) > 120 {
 			preview = preview[:120] + "..."
@@ -99,7 +114,7 @@ func (p *proxyConnection) SendSelectResultsWithQuery(rows pgx.Rows, query string
 
 // SendCommandComplete envia a mensagem de completamento de comando.
 func (p *proxyConnection) SendCommandComplete(cmd string) {
-	tag := sql.GetCommandTag(cmd)
+	tag := sql.GetCommandTagFallback(cmd)
 	p.backend.Send(&pgproto3.CommandComplete{CommandTag: []byte(tag)})
 }
 

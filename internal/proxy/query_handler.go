@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 
+	pg_query "github.com/pganalyze/pg_query_go/v5"
+
 	"pgtest-sandbox/pkg/protocol"
 	"pgtest-sandbox/pkg/sql"
 
@@ -37,27 +39,79 @@ func recoverSessionTxAfterDirectExec(session *TestSession) {
 //   - true para fluxo "Simple Query" (envia ReadyForQuery ao final).
 //   - false para fluxo "Extended Query" (não envia, espera-se recebimento de Sync depois).
 func (p *proxyConnection) ExecuteInterpretedQuery(testID string, query string, sendReadyForQuery bool, args ...any) error {
-	commands := sql.SplitCommands(query)
-	var expanded []string
-	for _, cmd := range commands {
-		c := strings.TrimSpace(cmd)
-		if c == "" {
-			continue
+	stmts, err := sql.ParseStatements(query)
+	if err != nil || len(stmts) == 0 {
+		// Fallback to string split when parse fails or empty (respects quotes, e.g. SET client_encoding='utf-8')
+		commands := sql.SplitCommandsFallback(query)
+		var expanded []string
+		for _, cmd := range commands {
+			c := strings.TrimSpace(cmd)
+			if c == "" {
+				continue
+			}
+			rewritten, isDEALLOCATE := p.rewriteDEALLOCATEForBackend(c)
+			if isDEALLOCATE {
+				expanded = append(expanded, rewritten...)
+			} else {
+				expanded = append(expanded, c)
+			}
 		}
-		rewritten, isDEALLOCATE := p.rewriteDEALLOCATEForBackend(c)
-		if isDEALLOCATE {
-			expanded = append(expanded, rewritten...)
-		} else {
-			expanded = append(expanded, c)
+		if len(expanded) == 0 {
+			return p.ForwardCommandToDB(testID, query, sendReadyForQuery, args...)
+		} else if len(expanded) == 1 {
+			return p.ForwardCommandToDB(testID, expanded[0], sendReadyForQuery, args...)
+		}
+		return p.SafeForwardMultipleCommandsToDB(testID, expanded, sendReadyForQuery)
+	}
+	var expanded []string
+	if len(stmts) > 1 {
+		// Multiple statements: use quote-aware split so we don't cut inside e.g. SET client_encoding='utf-8'
+		commands := sql.SplitCommandsFallback(query)
+		for _, cmd := range commands {
+			c := strings.TrimSpace(cmd)
+			if c == "" {
+				continue
+			}
+			singleStmts, _ := sql.ParseStatements(c)
+			if len(singleStmts) > 0 && singleStmts[0].Stmt != nil {
+				_, _, isDEALLOCATE := sql.ParseDeallocate(singleStmts[0].Stmt)
+				if isDEALLOCATE {
+					rewritten, _ := p.rewriteDEALLOCATEForBackend(c)
+					expanded = append(expanded, rewritten...)
+				} else {
+					expanded = append(expanded, c)
+				}
+			} else {
+				expanded = append(expanded, c)
+			}
+		}
+	} else {
+		// Single statement: CommandStringFromRaw is accurate
+		for _, raw := range stmts {
+			c := sql.CommandStringFromRaw(query, raw)
+			if c == "" {
+				continue
+			}
+			stmt := raw.Stmt
+			if stmt != nil {
+				_, _, isDEALLOCATE := sql.ParseDeallocate(stmt)
+				if isDEALLOCATE {
+					rewritten, _ := p.rewriteDEALLOCATEForBackend(c)
+					expanded = append(expanded, rewritten...)
+				} else {
+					expanded = append(expanded, c)
+				}
+			} else {
+				expanded = append(expanded, c)
+			}
 		}
 	}
 	if len(expanded) == 0 {
 		return p.ForwardCommandToDB(testID, query, sendReadyForQuery, args...)
 	} else if len(expanded) == 1 {
 		return p.ForwardCommandToDB(testID, expanded[0], sendReadyForQuery, args...)
-	} else {
-		return p.SafeForwardMultipleCommandsToDB(testID, expanded, sendReadyForQuery)
 	}
+	return p.SafeForwardMultipleCommandsToDB(testID, expanded, sendReadyForQuery)
 }
 
 // ForwardCommandToDB executa um único comando SQL na conexão/transação ativa.
@@ -74,7 +128,14 @@ func (p *proxyConnection) ForwardCommandToDB(testID string, query string, sendRe
 	}
 
 	// SELECT and INSERT/UPDATE/DELETE ... RETURNING return rows; use Query path and send result set.
-	if sql.ReturnsResultSet(query) {
+	var stmt *pg_query.Node
+	if stmts, parseErr := sql.ParseStatements(query); parseErr == nil && len(stmts) > 0 && stmts[0].Stmt != nil {
+		stmt = stmts[0].Stmt
+	}
+	if stmt != nil && sql.StmtReturnsResultSet(stmt) {
+		return p.ExecuteSelectQuery(testID, query, sendReadyForQuery, args...)
+	}
+	if stmt == nil && sql.ReturnsResultSetFallback(query) {
 		return p.ExecuteSelectQuery(testID, query, sendReadyForQuery, args...)
 	}
 
@@ -87,18 +148,36 @@ func (p *proxyConnection) ForwardCommandToDB(testID string, query string, sendRe
 	// All TCL (SAVEPOINT, RELEASE, ROLLBACK) goes to SafeExecTCL, which runs inside a guard
 	// so failed TCL does not abort the main transaction; it skips guard Commit on success
 	// for ROLLBACK/ROLLBACK TO SAVEPOINT (those commands roll back past the guard).
-	cmdType := sql.AnalyzeCommand(query).Type
+	var cmdType string
+	if stmt != nil {
+		cmdType = sql.ClassifyStatement(stmt)
+	} else {
+		cmdType = sql.CommandTypeFromQueryFallback(query)
+	}
 	isTransactionControl := cmdType == "SAVEPOINT" || cmdType == "RELEASE" || cmdType == "ROLLBACK"
 
+	isUserBegin := false
+	if stmt != nil {
+		isUserBegin = sql.IsSavepoint(stmt) && strings.HasPrefix(sql.GetSavepointName(stmt), "pgtest_v_")
+	} else {
+		isUserBegin = IsUserBeginQuery(query)
+	}
+
 	if isTransactionControl {
-		if IsUserBeginQuery(query) {
+		if isUserBegin {
 			if err := session.DB.ClaimOpenTransaction(p.connectionID()); err != nil {
 				return err
 			}
 		}
 		tag, err = session.DB.SafeExecTCL(context.Background(), query, args...)
 		if err != nil {
-			if IsQueryThatAffectsClaim(query) {
+			affectsClaim := isUserBegin
+			if stmt != nil {
+				affectsClaim = affectsClaim || (sql.IsReleaseSavepoint(stmt) && strings.HasPrefix(sql.GetSavepointName(stmt), "pgtest_v_"))
+			} else {
+				affectsClaim = IsQueryThatAffectsClaim(query)
+			}
+			if affectsClaim {
 				session.DB.ReleaseOpenTransaction(p.connectionID())
 			}
 			log.Printf("[PROXY] Erro na execução transacional (TCL): %v", err)
