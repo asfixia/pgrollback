@@ -103,7 +103,7 @@ Database returns to original state.
 
 We included an GUI for check the queries runned against the proxy (everything running on just one port only)
 
-![GUI for pgtest logs](doc\log_sql_commands.png)
+![GUI for pgtest logs](doc/log_sql_commands.png)
 
 # Run:
 
