@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"pgtest-sandbox/internal/config"
-	"pgtest-sandbox/internal/testutil"
-	"pgtest-sandbox/pkg/logger"
+	"pgrollback/internal/config"
+	"pgrollback/internal/testutil"
+	"pgrollback/pkg/logger"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )

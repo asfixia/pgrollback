@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	sqlpkg "pgtest-sandbox/pkg/sql"
+	sqlpkg "pgrollback/pkg/sql"
 )
 
 const maxQueryHistory = 100

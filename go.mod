@@ -1,4 +1,4 @@
-module pgtest-sandbox
+module pgrollback
 
 go 1.23
 

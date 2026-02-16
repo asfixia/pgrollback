@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strings"
 
-	"pgtest-sandbox/internal/config"
+	"pgrollback/internal/config"
 )
 
 // ConfigResponse is the config returned by GET /api/config (includes masked password and config_path).

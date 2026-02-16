@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"pgtest-sandbox/internal/config"
-	"pgtest-sandbox/internal/testutil"
-	tstproxy "pgtest-sandbox/tests/unit/proxy"
+	"pgrollback/internal/config"
+	"pgrollback/internal/testutil"
+	tstproxy "pgrollback/tests/unit/proxy"
 )
 
 func TestLoadConfig_FromFile(t *testing.T) {
@@ -132,7 +132,7 @@ func TestLoadConfig_FromEnvVar(t *testing.T) {
 	}()
 
 	// Define variável de ambiente apontando para o arquivo de config
-	configPath := "config/pgtest-sandbox.yaml"
+	configPath := "config/pgrollback.yaml"
 	os.Setenv("PGTEST_CONFIG", configPath)
 
 	cfg, err := config.LoadConfig(tstproxy.GetConfigPath())
@@ -273,7 +273,7 @@ func TestLoadConfig_ProjectRootDetection(t *testing.T) {
 	// Verifica se arquivo existe
 	if _, statErr := os.Stat(configPath); statErr == nil {
 		// Usa caminho relativo (deve funcionar se executado da raiz)
-		relPath := "config/pgtest-sandbox.yaml"
+		relPath := "config/pgrollback.yaml"
 		cfg, err := config.LoadConfig(relPath)
 
 		// Se executado da raiz, deve funcionar
@@ -324,7 +324,7 @@ test:
   query_timeout: 5s
   ping_timeout: 3s
 `)
-	if err := os.WriteFile(filepath.Join(configDir, "pgtest-sandbox.yaml"), minimalYAML, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(configDir, "pgrollback.yaml"), minimalYAML, 0644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 

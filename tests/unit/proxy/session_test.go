@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"pgtest-sandbox/internal/config"
-	"pgtest-sandbox/internal/proxy"
+	"pgrollback/internal/config"
+	"pgrollback/internal/proxy"
 )
 
 func TestGetOrCreateSession(t *testing.T) {

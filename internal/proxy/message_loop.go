@@ -10,8 +10,8 @@ import (
 
 	pg_query "github.com/pganalyze/pg_query_go/v5"
 
-	"pgtest-sandbox/pkg/protocol"
-	"pgtest-sandbox/pkg/sql"
+	"pgrollback/pkg/protocol"
+	"pgrollback/pkg/sql"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"

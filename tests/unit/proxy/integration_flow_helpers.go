@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"pgtest-sandbox/internal/proxy"
-	"pgtest-sandbox/internal/testutil"
+	"pgrollback/internal/proxy"
+	"pgrollback/internal/testutil"
 )
 
 // createTable cria uma tabela usando ExecuteWithLock e falha o teste se houver erro.

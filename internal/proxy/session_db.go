@@ -12,7 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	sqlpkg "pgtest-sandbox/pkg/sql"
+	sqlpkg "pgrollback/pkg/sql"
 )
 
 // ConnectionID is an opaque identifier for a proxy connection, used to allow

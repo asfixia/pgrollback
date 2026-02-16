@@ -1,9 +1,9 @@
 /.history
-config/pgtest-sandbox.yaml
+config/pgrollback.yaml
 .env
 bin/
 *.exe
-/config/pgtest-sandbox.yaml
+/config/pgrollback.yaml
 /.idea
 /.opencode
 *.md

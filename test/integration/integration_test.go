@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"pgtest-sandbox/internal/proxy"
-	"pgtest-sandbox/pkg/logger"
-	"pgtest-sandbox/pkg/postgres"
+	"pgrollback/internal/proxy"
+	"pgrollback/pkg/logger"
+	"pgrollback/pkg/postgres"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"

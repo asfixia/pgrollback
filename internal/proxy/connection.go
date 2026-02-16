@@ -14,7 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 
-	"pgtest-sandbox/pkg/sql"
+	"pgrollback/pkg/sql"
 )
 
 // ErrNoOpenUserTransaction is returned when COMMIT or ROLLBACK is executed but there is no open user transaction on this connection.

@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	sqlpkg "pgtest-sandbox/pkg/sql"
+	sqlpkg "pgrollback/pkg/sql"
 )
 
 // newTestSessionDB returns a realSessionDB with no real connection (nil conn/tx), suitable for query history unit tests.

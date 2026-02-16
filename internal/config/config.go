@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"time"
 
-	"pgtest-sandbox/internal/testutil"
+	"pgrollback/internal/testutil"
 
 	"gopkg.in/yaml.v3"
 )
@@ -140,14 +140,14 @@ func LoadConfigWithPath(configPath string) (*LoadConfigResult, error) {
 		// Se fornecido explicitamente, usa o caminho fornecido
 		finalConfigPath = configPath
 	} else {
-		// Por padrão, busca pgtest-sandbox.yaml na pasta do executável
+		// Por padrão, busca pgrollback.yaml na pasta do executável
 		execPath, err := os.Executable()
 		if err == nil {
 			execDir := filepath.Dir(execPath)
-			finalConfigPath = filepath.Join(execDir, "pgtest-sandbox.yaml")
+			finalConfigPath = filepath.Join(execDir, "pgrollback.yaml")
 		} else {
 			workDir, _ := os.Getwd()
-			finalConfigPath = filepath.Join(workDir, "config", "pgtest-sandbox.yaml")
+			finalConfigPath = filepath.Join(workDir, "config", "pgrollback.yaml")
 		}
 	}
 

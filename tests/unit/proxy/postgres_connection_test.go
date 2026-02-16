@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"pgtest-sandbox/internal/config"
-	"pgtest-sandbox/internal/proxy"
+	"pgrollback/internal/config"
+	"pgrollback/internal/proxy"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // Driver para database/sql
 )

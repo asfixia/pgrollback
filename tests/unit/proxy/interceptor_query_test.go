@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"pgtest-sandbox/internal/proxy"
-	"pgtest-sandbox/internal/testutil"
+	"pgrollback/internal/proxy"
+	"pgrollback/internal/testutil"
 )
 
 const testSetupConnectionID proxy.ConnectionID = 0

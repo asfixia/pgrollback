@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"pgtest-sandbox/pkg/sql"
+	"pgrollback/pkg/sql"
 )
 
 const (

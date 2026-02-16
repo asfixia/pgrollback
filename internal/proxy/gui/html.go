@@ -3,7 +3,7 @@ package gui
 import (
 	"strings"
 
-	"pgtest-sandbox/internal/tray"
+	"pgrollback/internal/tray"
 )
 
 const apiBasePlaceholder = "__API_BASE__"
