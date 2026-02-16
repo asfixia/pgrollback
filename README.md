@@ -242,7 +242,7 @@ pgrollback keeps long transactions open.
 
 # License
 
-MIT
+Apache License 2.0. See [LICENSE](LICENSE) for the full text.
 
 # Build
 
