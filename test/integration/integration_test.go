@@ -508,13 +508,27 @@ func TestIntegrationDEALLOCATEALLWithSameNameOnTwoConnections(t *testing.T) {
 	defer conn2.Close(ctx)
 
 	const stmtName = "pdo_stmt_00000002"
+	const stmtName2 = "pdo_stmt_00000001"
+	const stmtName3 = "pdo_stmt_00000000"
+	_, err = conn1.Prepare(ctx, stmtName2, "SELECT 101", nil)
+	if err != nil {
+		t.Fatalf("conn1 Prepare %s: %v", stmtName2, err)
+	}
 	_, err = conn1.Prepare(ctx, stmtName, "SELECT 201", nil)
 	if err != nil {
-		t.Fatalf("conn1 Prepare: %v", err)
+		t.Fatalf("conn1 Prepare %s: %v", stmtName, err)
+	}
+	_, err = conn1.Prepare(ctx, stmtName3, "SELECT 301", nil)
+	if err != nil {
+		t.Fatalf("conn1 Prepare %s: %v", stmtName, err)
+	}
+	_, err = conn2.Prepare(ctx, stmtName2, "SELECT 102", nil)
+	if err != nil {
+		t.Fatalf("conn2 Prepare %s: %v", stmtName2, err)
 	}
 	_, err = conn2.Prepare(ctx, stmtName, "SELECT 202", nil)
 	if err != nil {
-		t.Fatalf("conn2 Prepare: %v", err)
+		t.Fatalf("conn2 Prepare %s: %v", stmtName, err)
 	}
 
 	// conn1 runs DEALLOCATE ALL. Only conn1's backend statement is deallocated; conn2's remains.
@@ -544,6 +558,122 @@ func TestIntegrationDEALLOCATEALLWithSameNameOnTwoConnections(t *testing.T) {
 	if err := mrr2.Close(); err != nil {
 		t.Fatalf("conn2 DEALLOCATE %q: %v", stmtName, err)
 	}
+}
+
+// countPreparedStatementsOnBackend runs SELECT count(*) FROM pg_prepared_statements on the
+// shared backend via conn. Used to assert that a disconnected connection's statements were deallocated.
+func countPreparedStatementsOnBackend(t *testing.T, ctx context.Context, conn *pgconn.PgConn) int {
+	t.Helper()
+	mrr := conn.Exec(ctx, "SELECT count(*)::int FROM pg_prepared_statements")
+	defer mrr.Close()
+	if !mrr.NextResult() {
+		t.Fatalf("pg_prepared_statements: no result")
+		return 0
+	}
+	rr := mrr.ResultReader()
+	var count int
+	if rr.NextRow() {
+		vals := rr.Values()
+		if len(vals) > 0 && vals[0] != nil {
+			fmt.Sscanf(string(vals[0]), "%d", &count)
+		}
+	}
+	if _, err := rr.Close(); err != nil {
+		t.Fatalf("reading pg_prepared_statements count: %v", err)
+	}
+	return count
+}
+
+// TestIntegrationDisconnectDeallocatesPreparedStatements: two connections each prepare
+// two statements with the same names and one with a different name. When one connection
+// disconnects, the proxy must deallocate that connection's prepared statements on the
+// backend; the other connection must keep its allocated statements and use them successfully.
+func TestIntegrationDisconnectDeallocatesPreparedStatements(t *testing.T) {
+	testID := "test_disconnect_dealloc"
+	dsn := getPgRollbackProxyDSN(testID)
+	ctx := context.Background()
+
+	conn1, err := pgconn.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connection 1: %v", err)
+	}
+
+	conn2, err := pgconn.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connection 2: %v", err)
+	}
+	defer conn2.Close(ctx)
+
+	// Same statement names on both connections (2 shared names)
+	const stmtA = "pdo_stmt_00000001"
+	const stmtB = "pdo_stmt_00000002"
+	// One statement with a different name per connection
+	const conn1Only = "conn1_only"
+	const conn2Only = "conn2_only"
+
+	_, err = conn1.Prepare(ctx, stmtA, "SELECT 11", nil)
+	if err != nil {
+		t.Fatalf("conn1 Prepare %s: %v", stmtA, err)
+	}
+	_, err = conn1.Prepare(ctx, stmtB, "SELECT 12", nil)
+	if err != nil {
+		t.Fatalf("conn1 Prepare %s: %v", stmtB, err)
+	}
+	_, err = conn1.Prepare(ctx, conn1Only, "SELECT 13", nil)
+	if err != nil {
+		t.Fatalf("conn1 Prepare %s: %v", conn1Only, err)
+	}
+
+	_, err = conn2.Prepare(ctx, stmtA, "SELECT 21", nil)
+	if err != nil {
+		t.Fatalf("conn2 Prepare %s: %v", stmtA, err)
+	}
+	_, err = conn2.Prepare(ctx, stmtB, "SELECT 22", nil)
+	if err != nil {
+		t.Fatalf("conn2 Prepare %s: %v", stmtB, err)
+	}
+	_, err = conn2.Prepare(ctx, conn2Only, "SELECT 23", nil)
+	if err != nil {
+		t.Fatalf("conn2 Prepare %s: %v", conn2Only, err)
+	}
+
+	// Backend (shared by conn1 and conn2) has at least 6 prepared statements (3 per conn; may be more from session setup).
+	beforeCount := countPreparedStatementsOnBackend(t, ctx, conn2)
+	if beforeCount < 6 {
+		t.Fatalf("before disconnect: pg_prepared_statements count = %d, want at least 6 (conn1 and conn2 each have 3)", beforeCount)
+	}
+
+	// Disconnect conn1; proxy must deallocate conn1's statements on the backend.
+	if err := conn1.Close(ctx); err != nil {
+		t.Fatalf("conn1 Close: %v", err)
+	}
+
+	// Backend must have exactly 3 fewer prepared statements (conn1's 3 were deallocated on disconnect).
+	afterCount := countPreparedStatementsOnBackend(t, ctx, conn2)
+	if afterCount != beforeCount-3 {
+		t.Fatalf("after conn1 disconnect: pg_prepared_statements count = %d, want %d (conn1's 3 must be deallocated)", afterCount, beforeCount-3)
+	}
+
+	// conn2 must still have all three of its statements working.
+	execPreparedInt := func(conn *pgconn.PgConn, name string, want int) {
+		rr := conn.ExecPrepared(ctx, name, nil, nil, nil)
+		var val int
+		if rr.NextRow() {
+			vals := rr.Values()
+			if len(vals) > 0 && vals[0] != nil {
+				fmt.Sscanf(string(vals[0]), "%d", &val)
+			}
+		}
+		if _, err := rr.Close(); err != nil {
+			t.Fatalf("conn2 ExecPrepared %q after conn1 disconnect: %v", name, err)
+		}
+		if val != want {
+			t.Errorf("conn2 ExecPrepared %q = %d, want %d", name, val, want)
+		}
+	}
+	execPreparedInt(conn2, stmtA, 21)
+	execPreparedInt(conn2, stmtB, 22)
+	execPreparedInt(conn2, conn2Only, 23)
 }
 
 // TestMultipleQueriesReturnsLastOnly ensures the proxy returns only the last result for a

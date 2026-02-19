@@ -39,6 +39,7 @@ func recoverSessionTxAfterDirectExec(session *TestSession) {
 //   - true para fluxo "Simple Query" (envia ReadyForQuery ao final).
 //   - false para fluxo "Extended Query" (não envia, espera-se recebimento de Sync depois).
 func (p *proxyConnection) ExecuteInterpretedQuery(testID string, query string, sendReadyForQuery bool, args ...any) error {
+	var deallocatedInQuery []string
 	stmts, err := sql.ParseStatements(query)
 	if err != nil || len(stmts) == 0 {
 		// Fallback to string split when parse fails or empty (respects quotes, e.g. SET client_encoding='utf-8')
@@ -49,19 +50,23 @@ func (p *proxyConnection) ExecuteInterpretedQuery(testID string, query string, s
 			if c == "" {
 				continue
 			}
-			rewritten, isDEALLOCATE := p.rewriteDEALLOCATEForBackend(c)
+			rewritten, isDEALLOCATE, names := p.rewriteDEALLOCATEForBackend(c)
 			if isDEALLOCATE {
 				expanded = append(expanded, rewritten...)
+				deallocatedInQuery = append(deallocatedInQuery, names...)
 			} else {
 				expanded = append(expanded, c)
 			}
 		}
 		if len(expanded) == 0 {
 			return p.ForwardCommandToDB(testID, query, sendReadyForQuery, args...)
-		} else if len(expanded) == 1 {
-			return p.ForwardCommandToDB(testID, expanded[0], sendReadyForQuery, args...)
 		}
-		return p.SafeForwardMultipleCommandsToDB(testID, expanded, sendReadyForQuery)
+		err := p.executeExpandedCommands(testID, expanded, sendReadyForQuery)
+		if err != nil {
+			return err
+		}
+		p.RemovePreparedStatements(deallocatedInQuery)
+		return nil
 	}
 	var expanded []string
 	if len(stmts) > 1 {
@@ -76,8 +81,9 @@ func (p *proxyConnection) ExecuteInterpretedQuery(testID string, query string, s
 			if len(singleStmts) > 0 && singleStmts[0].Stmt != nil {
 				_, _, isDEALLOCATE := sql.ParseDeallocate(singleStmts[0].Stmt)
 				if isDEALLOCATE {
-					rewritten, _ := p.rewriteDEALLOCATEForBackend(c)
+					rewritten, _, names := p.rewriteDEALLOCATEForBackend(c)
 					expanded = append(expanded, rewritten...)
+					deallocatedInQuery = append(deallocatedInQuery, names...)
 				} else {
 					expanded = append(expanded, c)
 				}
@@ -86,7 +92,8 @@ func (p *proxyConnection) ExecuteInterpretedQuery(testID string, query string, s
 			}
 		}
 	} else {
-		// Single statement: CommandStringFromRaw is accurate
+		// Single statement: use CommandStringFromRaw when parser gave StmtLocation/StmtLen;
+		// otherwise (ErrNoStatementBounds) use full query when this is the only statement.
 		for _, raw := range stmts {
 			c := sql.CommandStringFromRaw(query, raw)
 			if c == "" {
@@ -96,8 +103,9 @@ func (p *proxyConnection) ExecuteInterpretedQuery(testID string, query string, s
 			if stmt != nil {
 				_, _, isDEALLOCATE := sql.ParseDeallocate(stmt)
 				if isDEALLOCATE {
-					rewritten, _ := p.rewriteDEALLOCATEForBackend(c)
+					rewritten, _, names := p.rewriteDEALLOCATEForBackend(c)
 					expanded = append(expanded, rewritten...)
+					deallocatedInQuery = append(deallocatedInQuery, names...)
 				} else {
 					expanded = append(expanded, c)
 				}
@@ -108,8 +116,19 @@ func (p *proxyConnection) ExecuteInterpretedQuery(testID string, query string, s
 	}
 	if len(expanded) == 0 {
 		return p.ForwardCommandToDB(testID, query, sendReadyForQuery, args...)
-	} else if len(expanded) == 1 {
-		return p.ForwardCommandToDB(testID, expanded[0], sendReadyForQuery, args...)
+	}
+	err = p.executeExpandedCommands(testID, expanded, sendReadyForQuery)
+	if err != nil {
+		return err
+	}
+	p.RemovePreparedStatements(deallocatedInQuery)
+	return nil
+}
+
+// executeExpandedCommands runs the expanded command list (single or multiple).
+func (p *proxyConnection) executeExpandedCommands(testID string, expanded []string, sendReadyForQuery bool) error {
+	if len(expanded) == 1 {
+		return p.ForwardCommandToDB(testID, expanded[0], sendReadyForQuery)
 	}
 	return p.SafeForwardMultipleCommandsToDB(testID, expanded, sendReadyForQuery)
 }

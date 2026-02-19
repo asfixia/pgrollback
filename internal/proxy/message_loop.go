@@ -358,9 +358,6 @@ func (p *proxyConnection) handleMessageParse(testID string, msg *pgproto3.Parse)
 		return
 	}
 	p.SetPreparedStatement(msg.Name, interceptedQuery)
-	if session.DB != nil {
-		session.DB.SetPreparedStatement(msg.Name, interceptedQuery) // GUI/history
-	}
 	var numStmts int
 	if stmts, err := sql.ParseStatements(interceptedQuery); err == nil {
 		numStmts = len(stmts)

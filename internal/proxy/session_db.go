@@ -35,14 +35,8 @@ type realSessionDB struct {
 	SavepointLevel       int
 	connectionWithOpenTx ConnectionID // which connection has the transaction; 0 when none
 	stopKeepalive        func()
-	lastQuery            string
-	queryHistory         []queryHistoryEntry                     // last N executed queries (oldest first), max maxQueryHistory
-	preparedStatements   map[string]string                       // statement name -> intercepted query (Extended Query); always non-nil (set in newSessionDB)
-	statementDescs       map[string]*pgconn.StatementDescription // statement name -> cached description from Prepare(); may be nil entry
-	portalToStatement    map[string]string                       // portal name -> statement name (Extended Query); always non-nil (set in newSessionDB)
-	portalParams         map[string][][]byte                     // portal name -> bound parameter values (from Bind); always non-nil
-	portalFormatCodes    map[string][]int16                      // portal name -> ParameterFormatCodes (0=text, 1=binary)
-	portalResultFormats  map[string][]int16                      // portal name -> ResultFormatCodes (from Bind)
+	lastQuery   string
+	queryHistory []queryHistoryEntry // last N executed queries (oldest first), max maxQueryHistory
 }
 
 func (d *realSessionDB) GetSavepointLevel() int {
@@ -183,132 +177,6 @@ func (d *realSessionDB) ReleaseOpenTransaction(connID ConnectionID) {
 func (d *realSessionDB) releaseOpenTransactionLocked(connID ConnectionID) {
 	if d.connectionWithOpenTx == connID {
 		d.connectionWithOpenTx = 0
-	}
-}
-
-// SetPreparedStatement stores the intercepted query for the given statement name (Extended Query).
-// Caller must hold no locks; the method uses d.mu.
-func (d *realSessionDB) SetPreparedStatement(statementName, query string) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.preparedStatements[statementName] = query
-}
-
-// SetStatementDescription caches a pgconn.StatementDescription (returned by PgConn.Prepare) for later
-// use by Describe and ExecPrepared. Caller must hold no locks.
-func (d *realSessionDB) SetStatementDescription(name string, sd *pgconn.StatementDescription) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.statementDescs[name] = sd
-}
-
-// GetStatementDescription returns the cached StatementDescription for the given statement name, or nil.
-func (d *realSessionDB) GetStatementDescription(name string) *pgconn.StatementDescription {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.statementDescs[name]
-}
-
-// GetStatementDescriptionForPortal returns the cached StatementDescription for the statement bound to the given portal.
-func (d *realSessionDB) GetStatementDescriptionForPortal(portalName string) *pgconn.StatementDescription {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	stmtName := d.portalToStatement[portalName]
-	return d.statementDescs[stmtName]
-}
-
-// PortalResultFormats returns the ResultFormatCodes for the given portal, or nil.
-func (d *realSessionDB) PortalResultFormats(portalName string) []int16 {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.portalResultFormats[portalName]
-}
-
-// PortalStatementName returns the statement name bound to the given portal.
-func (d *realSessionDB) PortalStatementName(portalName string) string {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.portalToStatement[portalName]
-}
-
-// BindPortal records which portal is bound to which statement and stores the bound parameters and format codes (Extended Query).
-// parameters can be nil or empty; formatCodes can be nil (treated as all text). Caller must hold no locks; the method uses d.mu.
-func (d *realSessionDB) BindPortal(portalName, statementName string, parameters [][]byte, formatCodes []int16, resultFormatCodes ...[]int16) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.portalToStatement[portalName] = statementName
-	if parameters != nil {
-		dup := make([][]byte, len(parameters))
-		for i, p := range parameters {
-			if p != nil {
-				dup[i] = make([]byte, len(p))
-				copy(dup[i], p)
-			}
-		}
-		d.portalParams[portalName] = dup
-	} else {
-		d.portalParams[portalName] = nil
-	}
-	if formatCodes != nil {
-		dup := make([]int16, len(formatCodes))
-		copy(dup, formatCodes)
-		d.portalFormatCodes[portalName] = dup
-	} else {
-		delete(d.portalFormatCodes, portalName)
-	}
-	if len(resultFormatCodes) > 0 && resultFormatCodes[0] != nil {
-		dup := make([]int16, len(resultFormatCodes[0]))
-		copy(dup, resultFormatCodes[0])
-		d.portalResultFormats[portalName] = dup
-	} else {
-		delete(d.portalResultFormats, portalName)
-	}
-}
-
-// QueryForPortal returns the query, bound parameters, and format codes for the given portal, or ("", nil, nil, false) if not found.
-// params may be nil; formatCodes may be nil (treat as all text). Unnamed portal/statement (empty string) is valid per protocol.
-// Caller must hold no locks; the method uses d.mu.
-func (d *realSessionDB) QueryForPortal(portalName string) (query string, params [][]byte, formatCodes []int16, ok bool) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	statementName := d.portalToStatement[portalName]
-	query = d.preparedStatements[statementName]
-	params = d.portalParams[portalName]
-	formatCodes = d.portalFormatCodes[portalName]
-	return query, params, formatCodes, query != ""
-}
-
-// QueryForDescribe returns the query text for the given statement or portal (Describe message).
-// Use for answering ParameterDescription (count $1,$2,... placeholders). Caller must hold no locks.
-func (d *realSessionDB) QueryForDescribe(objectType byte, name string) (query string, ok bool) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	switch objectType {
-	case 'S':
-		query = d.preparedStatements[name]
-	case 'P':
-		statementName := d.portalToStatement[name]
-		query = d.preparedStatements[statementName]
-	default:
-		return "", false
-	}
-	return query, query != ""
-}
-
-// CloseStatementOrPortal removes the statement or portal from the maps (objectType 'S' or 'P').
-// Caller must hold no locks; the method uses d.mu.
-func (d *realSessionDB) CloseStatementOrPortal(objectType byte, name string) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	switch objectType {
-	case 'S':
-		delete(d.preparedStatements, name)
-		delete(d.statementDescs, name)
-	case 'P':
-		delete(d.portalToStatement, name)
-		delete(d.portalParams, name)
-		delete(d.portalFormatCodes, name)
-		delete(d.portalResultFormats, name)
 	}
 }
 
@@ -761,14 +629,8 @@ func (d *realSessionDB) Tx() pgx.Tx {
 // newSessionDB creates a realSessionDB with the given connection and transaction (caller must have begun tx on conn).
 func newSessionDB(conn *pgx.Conn, tx pgx.Tx) *realSessionDB {
 	d := &realSessionDB{
-		conn:                conn,
-		tx:                  tx,
-		preparedStatements:  make(map[string]string),
-		statementDescs:      make(map[string]*pgconn.StatementDescription),
-		portalToStatement:   make(map[string]string),
-		portalParams:        make(map[string][][]byte),
-		portalFormatCodes:   make(map[string][]int16),
-		portalResultFormats: make(map[string][]int16),
+		conn: conn,
+		tx:   tx,
 	}
 	return d
 }

@@ -44,6 +44,9 @@ func printRLog(format string, v interface{}) {
 // been closed by COMMIT/ROLLBACK on this connection; on disconnect we roll back that many
 // savepoints to match real PostgreSQL behavior (implicit rollback on disconnect).
 // Per-connection statement/portal maps avoid collisions when multiple connections share the same session (testID).
+// Prepared statements are tracked per connection; "DEALLOCATE ALL" is faked to only deallocate
+// statements prepared on this connection, and on disconnect we deallocate all of this connection's
+// statements so the shared backend stays clean.
 type proxyConnection struct {
 	clientConn               net.Conn
 	backend                  *pgproto3.Backend
@@ -104,20 +107,20 @@ func (p *proxyConnection) backendStmtName(clientName string) string {
 
 // rewriteDEALLOCATEForBackend rewrites a DEALLOCATE simple-query so the backend sees
 // this connection's prefixed statement names. Multiple client connections (same testID)
-// share one backend connection but each uses its own prefix; forwarding "DEALLOCATE pdo_stmt_00000003"
-// would fail because the backend has "c<id>_pdo_stmt_00000003".
-// Returns (rewritten commands, true) if query was DEALLOCATE; otherwise (nil, false).
-// For "DEALLOCATE name" returns one command with backend name. For "DEALLOCATE ALL" returns
-// one DEALLOCATE per prepared statement owned by this connection (or ["SELECT 1"] if none).
+// share one backend but each has its own prepared statements; we track them per connection
+// and "DEALLOCATE ALL" is faked to only deallocate statements prepared on this connection.
+// Returns (rewritten commands, true, names deallocated) if query was DEALLOCATE; otherwise (nil, false, nil).
+// For "DEALLOCATE name" returns one command and [name]. For "DEALLOCATE ALL" returns
+// one DEALLOCATE per prepared statement owned by this connection (or ["SELECT 1"] and nil if none).
 // Uses AST (sql.ParseDeallocate) so comments are handled by the PG parser.
-func (p *proxyConnection) rewriteDEALLOCATEForBackend(query string) (rewritten []string, isDEALLOCATE bool) {
+func (p *proxyConnection) rewriteDEALLOCATEForBackend(query string) (rewritten []string, isDEALLOCATE bool, deallocatedNames []string) {
 	stmts, err := sql.ParseStatements(query)
 	if err != nil || len(stmts) == 0 || stmts[0].Stmt == nil {
-		return nil, false
+		return nil, false, nil
 	}
 	name, isAll, ok := sql.ParseDeallocate(stmts[0].Stmt)
 	if !ok {
-		return nil, false
+		return nil, false, nil
 	}
 	if isAll {
 		names := p.copyPreparedStatementNames()
@@ -126,13 +129,14 @@ func (p *proxyConnection) rewriteDEALLOCATEForBackend(query string) (rewritten [
 				continue
 			}
 			rewritten = append(rewritten, "DEALLOCATE "+p.backendStmtName(n))
+			deallocatedNames = append(deallocatedNames, n)
 		}
 		if len(rewritten) == 0 {
 			rewritten = []string{"SELECT 1"}
 		}
-		return rewritten, true
+		return rewritten, true, deallocatedNames
 	}
-	return []string{"DEALLOCATE " + p.backendStmtName(name)}, true
+	return []string{"DEALLOCATE " + p.backendStmtName(name)}, true, []string{name}
 }
 
 // SetPreparedStatement stores the intercepted query for the given statement name (Extended Query).
@@ -248,6 +252,35 @@ func (p *proxyConnection) copyPreparedStatementNames() []string {
 		names = append(names, n)
 	}
 	return names
+}
+
+// RemovePreparedStatements removes the given statement names from per-connection tracking
+// (and any portals bound to those statements). Call after executing DEALLOCATE so the
+// next DEALLOCATE ALL or disconnect only considers still-allocated statements.
+func (p *proxyConnection) RemovePreparedStatements(names []string) {
+	if len(names) == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	nameSet := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		nameSet[n] = struct{}{}
+	}
+	for n := range nameSet {
+		delete(p.preparedStatements, n)
+		delete(p.statementDescs, n)
+		delete(p.multiStatementStatements, n)
+		// Remove portals that were bound to this statement
+		for portal, stmt := range p.portalToStatement {
+			if stmt == n {
+				delete(p.portalToStatement, portal)
+				delete(p.portalParams, portal)
+				delete(p.portalFormatCodes, portal)
+				delete(p.portalResultFormats, portal)
+			}
+		}
+	}
 }
 
 // clearStatementPortalState clears all per-connection statement/portal maps (call after deallocate on disconnect).

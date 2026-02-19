@@ -17,7 +17,7 @@ func TestRewriteDEALLOCATEForBackend(t *testing.T) {
 	p.portalToStatement = make(map[string]string)
 
 	// DEALLOCATE <name>: should return one command with backend-prefixed name
-	rewritten, isDEALLOCATE := p.rewriteDEALLOCATEForBackend("DEALLOCATE pdo_stmt_00000003")
+	rewritten, isDEALLOCATE, _ := p.rewriteDEALLOCATEForBackend("DEALLOCATE pdo_stmt_00000003")
 	if !isDEALLOCATE || len(rewritten) != 1 {
 		t.Fatalf("DEALLOCATE name: isDEALLOCATE=%v len=%d, want true, 1", isDEALLOCATE, len(rewritten))
 	}
@@ -25,21 +25,21 @@ func TestRewriteDEALLOCATEForBackend(t *testing.T) {
 		t.Errorf("DEALLOCATE name: got %q, want DEALLOCATE c<id>_pdo_stmt_00000003", rewritten[0])
 	}
 
-	// Not DEALLOCATE: (nil, false)
-	rewritten, isDEALLOCATE = p.rewriteDEALLOCATEForBackend("SELECT 1")
+	// Not DEALLOCATE: (nil, false, nil)
+	rewritten, isDEALLOCATE, _ = p.rewriteDEALLOCATEForBackend("SELECT 1")
 	if isDEALLOCATE || rewritten != nil {
 		t.Errorf("SELECT 1: got (%v, %v), want (nil, false)", rewritten, isDEALLOCATE)
 	}
 
 	// DEALLOCATE ALL with no statements: ["SELECT 1"]
-	rewritten, isDEALLOCATE = p.rewriteDEALLOCATEForBackend("DEALLOCATE ALL")
+	rewritten, isDEALLOCATE, _ = p.rewriteDEALLOCATEForBackend("DEALLOCATE ALL")
 	if !isDEALLOCATE || len(rewritten) != 1 || rewritten[0] != "SELECT 1" {
 		t.Errorf("DEALLOCATE ALL (no stmts): got %v, %v, want [SELECT 1], true", rewritten, isDEALLOCATE)
 	}
 
 	// DEALLOCATE ALL with one prepared statement: one DEALLOCATE with backend name
 	p.SetPreparedStatement("s1", "SELECT 1")
-	rewritten, isDEALLOCATE = p.rewriteDEALLOCATEForBackend("DEALLOCATE ALL")
+	rewritten, isDEALLOCATE, _ = p.rewriteDEALLOCATEForBackend("DEALLOCATE ALL")
 	if !isDEALLOCATE || len(rewritten) != 1 {
 		t.Fatalf("DEALLOCATE ALL (one stmt): isDEALLOCATE=%v len=%d", isDEALLOCATE, len(rewritten))
 	}
@@ -55,7 +55,7 @@ func TestRewriteDEALLOCATEForBackend(t *testing.T) {
 		portalToStatement:        make(map[string]string),
 	}
 	p2.SetPreparedStatement("stmt_x", "SELECT 2")
-	rewritten, isDEALLOCATE = p2.rewriteDEALLOCATEForBackend("DEALLOCATE    \r\n/**/ ALL")
+	rewritten, isDEALLOCATE, _ = p2.rewriteDEALLOCATEForBackend("DEALLOCATE    \r\n/**/ ALL")
 	if !isDEALLOCATE {
 		t.Fatalf("DEALLOCATE     ALL: isDEALLOCATE=%v, want true", isDEALLOCATE)
 	}
@@ -88,7 +88,7 @@ func TestDEALLOCATEOnlyAffectsOwnConnection(t *testing.T) {
 	connA.SetPreparedStatement("pdo_stmt_00000001", "SELECT 1")
 
 	// Connection B tries to DEALLOCATE the same client-side name.
-	rewritten, isDEALLOCATE := connB.rewriteDEALLOCATEForBackend("DEALLOCATE pdo_stmt_00000001")
+	rewritten, isDEALLOCATE, _ := connB.rewriteDEALLOCATEForBackend("DEALLOCATE pdo_stmt_00000001")
 	if !isDEALLOCATE || len(rewritten) != 1 {
 		t.Fatalf("connB DEALLOCATE: isDEALLOCATE=%v len=%d, want true, 1", isDEALLOCATE, len(rewritten))
 	}
@@ -140,7 +140,7 @@ func TestDEALLOCATEALLWithSameNameOnTwoConnections(t *testing.T) {
 
 	// Connection A runs DEALLOCATE ALL. It must only deallocate A's statement, not B's.
 	// So the rewrite must contain only A's backend name; B's statement remains on the backend.
-	rewrittenA, isDEALLOCATE := connA.rewriteDEALLOCATEForBackend("DEALLOCATE ALL")
+	rewrittenA, isDEALLOCATE, _ := connA.rewriteDEALLOCATEForBackend("DEALLOCATE ALL")
 	if !isDEALLOCATE || len(rewrittenA) != 1 {
 		t.Fatalf("connA DEALLOCATE ALL: isDEALLOCATE=%v len=%d, want true, 1", isDEALLOCATE, len(rewrittenA))
 	}
@@ -154,7 +154,7 @@ func TestDEALLOCATEALLWithSameNameOnTwoConnections(t *testing.T) {
 	}
 
 	// Connection B runs DEALLOCATE <same name>. It must succeed by deallocating only B's.
-	rewrittenB, isDEALLOCATE := connB.rewriteDEALLOCATEForBackend("DEALLOCATE " + sameName)
+	rewrittenB, isDEALLOCATE, _ := connB.rewriteDEALLOCATEForBackend("DEALLOCATE " + sameName)
 	if !isDEALLOCATE || len(rewrittenB) != 1 {
 		t.Fatalf("connB DEALLOCATE %q: isDEALLOCATE=%v len=%d, want true, 1", sameName, isDEALLOCATE, len(rewrittenB))
 	}

@@ -22,41 +22,41 @@ func (p *PgRollback) InterceptQuery(testID string, query string, connID Connecti
 	queryUpper := strings.ToUpper(queryTrimmed)
 
 	if strings.HasPrefix(queryUpper, "PGROLLBACK") {
-		return p.handlePgRollbackCommand(testID, queryTrimmed)
+		return p.interceptPgRollbackCommand(testID, queryTrimmed)
 	}
 
 	stmts, err := sql.ParseStatements(query)
 	if err == nil && len(stmts) > 0 && stmts[0].Stmt != nil {
 		stmt := stmts[0].Stmt
 		if sql.IsTransactionBegin(stmt) {
-			return p.handleBegin(testID, connID)
+			return p.interceptBegin(testID, connID)
 		}
 		if sql.IsTransactionCommit(stmt) {
-			return p.handleCommit(testID)
+			return p.interceptCommit(testID)
 		}
 		if sql.IsTransactionRollback(stmt) {
-			return p.handleRollback(testID)
+			return p.interceptRollback(testID)
 		}
 		return query, nil
 	}
 
 	// Fallback when parse fails (e.g. malformed SQL)
 	if strings.HasPrefix(queryUpper, "BEGIN") {
-		return p.handleBegin(testID, connID)
+		return p.interceptBegin(testID, connID)
 	}
 	if strings.HasPrefix(queryUpper, "COMMIT") {
-		return p.handleCommit(testID)
+		return p.interceptCommit(testID)
 	}
 	if strings.HasPrefix(queryUpper, "ROLLBACK") && !strings.Contains(queryUpper, "SAVEPOINT") {
-		return p.handleRollback(testID)
+		return p.interceptRollback(testID)
 	}
 
 	return query, nil
 }
 
-// handlePgRollbackCommand processa comandos PgRollback especiais
+// interceptPgRollbackCommand processa comandos PgRollback especiais
 // Usa o testID da sessão quando disponível, evitando a necessidade de passá-lo como parâmetro
-func (p *PgRollback) handlePgRollbackCommand(testID string, query string) (string, error) {
+func (p *PgRollback) interceptPgRollbackCommand(testID string, query string) (string, error) {
 	parts := strings.Fields(query)
 	if len(parts) < 2 {
 		return "", fmt.Errorf("comando pgrollback inválido: %s", query)
@@ -90,7 +90,7 @@ func (p *PgRollback) handlePgRollbackCommand(testID string, query string) (strin
 	}
 }
 
-// handleBegin converte BEGIN em SAVEPOINT
+// interceptBegin converte BEGIN em SAVEPOINT
 //
 // Comportamento:
 // - Se não houver transação base, cria uma primeiro (garantia de segurança)
@@ -104,7 +104,7 @@ func (p *PgRollback) handlePgRollbackCommand(testID string, query string) (strin
 // - PHP faz comandos → executa BEGIN novamente → cria savepoint pgrollback_v_2
 // - PHP executa ROLLBACK → faz rollback até pgrollback_v_2 (não afeta pgrollback_v_1)
 // - PHP desconecta → próxima conexão PHP com mesmo testID pode continuar de onde parou
-func (p *PgRollback) handleBegin(testID string, connID ConnectionID) (string, error) {
+func (p *PgRollback) interceptBegin(testID string, connID ConnectionID) (string, error) {
 	session := p.GetSession(testID)
 	if session == nil {
 		return "", fmt.Errorf("Session not found '%s'", testID)
@@ -112,8 +112,8 @@ func (p *PgRollback) handleBegin(testID string, connID ConnectionID) (string, er
 	return session.handleBegin(testID, connID)
 }
 
-// handleCommit converte COMMIT em RELEASE SAVEPOINT
-func (p *PgRollback) handleCommit(testID string) (string, error) {
+// interceptCommit converte COMMIT em RELEASE SAVEPOINT
+func (p *PgRollback) interceptCommit(testID string) (string, error) {
 	session := p.GetSession(testID)
 	if session == nil {
 		return "", fmt.Errorf("Transaction was not found to do a Commit on '%s'", testID)
@@ -121,7 +121,7 @@ func (p *PgRollback) handleCommit(testID string) (string, error) {
 	return session.handleCommit(testID)
 }
 
-// handleRollback converte ROLLBACK em ROLLBACK TO SAVEPOINT
+// interceptRollback converte ROLLBACK em ROLLBACK TO SAVEPOINT
 //
 // Comportamento:
 // - Se SavepointLevel > 0: faz rollback até o último savepoint e o remove
@@ -131,7 +131,7 @@ func (p *PgRollback) handleCommit(testID string) (string, error) {
 // - PHP executa ROLLBACK → reverte até o último savepoint criado por esta conexão
 // - Isso permite que cada conexão/cliente tenha seu próprio rollback isolado
 // - O rollback não afeta outras conexões que compartilham a mesma sessão/testID
-func (p *PgRollback) handleRollback(testID string) (string, error) {
+func (p *PgRollback) interceptRollback(testID string) (string, error) {
 	session := p.GetSession(testID)
 	if session == nil {
 		return "", fmt.Errorf("Error no session for ID: '%s'", testID)

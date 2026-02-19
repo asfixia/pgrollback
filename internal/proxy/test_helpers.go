@@ -47,7 +47,7 @@ func NewTestSessionWithLevel(pgrollback *PgRollback, testID string) *TestSession
 	if session.DB == nil || !session.DB.HasActiveTransaction() {
 		return nil
 	}
-	q, err := pgrollback.handleBegin(testID, testSetupConnectionID)
+	q, err := pgrollback.interceptBegin(testID, testSetupConnectionID)
 	if err != nil {
 		return nil
 	}

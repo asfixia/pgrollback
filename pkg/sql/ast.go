@@ -25,25 +25,21 @@ func ParseStatements(sql string) ([]*pg_query.RawStmt, error) {
 }
 
 // CommandStringFromRaw returns the SQL substring for a single RawStmt (PG uses 1-based StmtLocation).
-// Returns trimmed command, or empty string if location/len are invalid.
+// If the parser did not populate StmtLocation/StmtLen (e.g. for some utility statements like
+// DEALLOCATE ALL), it returns ErrNoStatementBounds so callers can fall back (e.g. use full query
+// when there is only one statement).
 func CommandStringFromRaw(query string, raw *pg_query.RawStmt) string {
-	if raw == nil {
-		return ""
+	start := int(raw.StmtLocation)
+	end := start + int(raw.StmtLen)
+	var stmt string = ""
+
+	if raw.StmtLen > 0 && start >= 0 && end <= len(query) {
+		stmt = query[start:end]
+	} else if start >= 0 && start < len(query) {
+		stmt = query[start:]
 	}
-	loc := int(raw.GetStmtLocation())
-	length := int(raw.GetStmtLen())
-	if loc < 1 || length <= 0 {
-		return ""
-	}
-	start := loc - 1
-	end := start + length
-	if end > len(query) {
-		end = len(query)
-	}
-	if start >= len(query) {
-		return ""
-	}
-	return strings.TrimSpace(query[start:end])
+
+	return strings.TrimSpace(stmt)
 }
 
 // ClassifyStatement returns the statement kind: SELECT, INSERT, UPDATE, DELETE, BEGIN, COMMIT, ROLLBACK, SAVEPOINT, RELEASE, DEALLOCATE, SET, CREATE, DROP, OTHER.
