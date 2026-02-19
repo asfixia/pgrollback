@@ -117,7 +117,7 @@ func (p *proxyConnection) ExecuteInterpretedQuery(testID string, query string, s
 // ForwardCommandToDB executa um único comando SQL na conexão/transação ativa.
 // args são os parâmetros para query parametrizada (Extended Query); opcional.
 func (p *proxyConnection) ForwardCommandToDB(testID string, query string, sendReadyForQuery bool, args ...any) error {
-	session := p.server.Pgtest.GetSession(testID)
+	session := p.server.PgRollback.GetSession(testID)
 	if session == nil || session.DB == nil {
 		return fmt.Errorf("sessão não encontrada para testID: %s", testID)
 	}
@@ -158,7 +158,7 @@ func (p *proxyConnection) ForwardCommandToDB(testID string, query string, sendRe
 
 	isUserBegin := false
 	if stmt != nil {
-		isUserBegin = sql.IsSavepoint(stmt) && strings.HasPrefix(sql.GetSavepointName(stmt), "pgtest_v_")
+		isUserBegin = sql.IsSavepoint(stmt) && strings.HasPrefix(sql.GetSavepointName(stmt), "pgrollback_v_")
 	} else {
 		isUserBegin = IsUserBeginQuery(query)
 	}
@@ -173,7 +173,7 @@ func (p *proxyConnection) ForwardCommandToDB(testID string, query string, sendRe
 		if err != nil {
 			affectsClaim := isUserBegin
 			if stmt != nil {
-				affectsClaim = affectsClaim || (sql.IsReleaseSavepoint(stmt) && strings.HasPrefix(sql.GetSavepointName(stmt), "pgtest_v_"))
+				affectsClaim = affectsClaim || (sql.IsReleaseSavepoint(stmt) && strings.HasPrefix(sql.GetSavepointName(stmt), "pgrollback_v_"))
 			} else {
 				affectsClaim = IsQueryThatAffectsClaim(query)
 			}
@@ -208,20 +208,20 @@ func (p *proxyConnection) ForwardCommandToDB(testID string, query string, sendRe
 
 	if tagStr != "" {
 		//log.Printf("[PROXY] Enviando CommandComplete: '%s'", tagStr)
-		if os.Getenv("PGTEST_LOG_MESSAGE_ORDER") == "1" {
+		if os.Getenv("PGROLLBACK_LOG_MESSAGE_ORDER") == "1" {
 			log.Printf("[MSG_ORDER] SEND CommandComplete: %s", tagStr)
 		}
 		p.backend.Send(&pgproto3.CommandComplete{CommandTag: []byte(tagStr)})
 	} else {
 		//log.Printf("[PROXY] Tag vazia recebida, enviando SelectZero default")
-		if os.Getenv("PGTEST_LOG_MESSAGE_ORDER") == "1" {
+		if os.Getenv("PGROLLBACK_LOG_MESSAGE_ORDER") == "1" {
 			log.Printf("[MSG_ORDER] SEND CommandComplete: -- ping")
 		}
 		p.backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("-- ping")})
 	}
 
 	if sendReadyForQuery {
-		if os.Getenv("PGTEST_LOG_MESSAGE_ORDER") == "1" {
+		if os.Getenv("PGROLLBACK_LOG_MESSAGE_ORDER") == "1" {
 			log.Printf("[MSG_ORDER] SEND ReadyForQuery")
 		}
 		log.Printf("[PROXY] Enviando ReadyForQuery (Simple Query)")
@@ -236,9 +236,9 @@ func (p *proxyConnection) ForwardCommandToDB(testID string, query string, sendRe
 // Runs the whole batch inside a savepoint: either all commands succeed (RELEASE SAVEPOINT) or none apply (ROLLBACK TO SAVEPOINT).
 // The real transaction is never aborted; only the savepoint is rolled back on failure.
 func (p *proxyConnection) SafeForwardMultipleCommandsToDB(testID string, commands []string, sendReadyForQuery bool) error {
-	const multiCommandSavepointName = "pgtest_multi_guard"
+	const multiCommandSavepointName = "pgrollback_multi_guard"
 	ctx := context.Background()
-	session := p.server.Pgtest.GetSession(testID)
+	session := p.server.PgRollback.GetSession(testID)
 	if session == nil {
 		return fmt.Errorf("sessão não encontrada para testID: '%s'", testID)
 	}
@@ -377,7 +377,7 @@ func (p *proxyConnection) SafeForwardMultipleCommandsToDB(testID string, command
 
 // ExecuteSelectQuery executa um SELECT e envia os resultados. args são parâmetros (Extended Query); opcional.
 func (p *proxyConnection) ExecuteSelectQuery(testID string, query string, sendReadyForQuery bool, args ...any) error {
-	session := p.server.Pgtest.GetSession(testID)
+	session := p.server.PgRollback.GetSession(testID)
 	if session == nil {
 		return fmt.Errorf("sessão não encontrada para testID: %s", testID)
 	}

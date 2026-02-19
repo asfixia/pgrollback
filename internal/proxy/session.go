@@ -14,7 +14,7 @@ import (
 )
 
 // BackendStartupCache holds ParameterStatus and BackendKeyData from the real PostgreSQL
-// so we can replay them to clients when they connect to pgtest instead of hardcoded values.
+// so we can replay them to clients when they connect to pgrollback instead of hardcoded values.
 type BackendStartupCache struct {
 	ParameterStatuses []pgproto3.ParameterStatus // order preserved for consistent client behavior
 	BackendKeyData    pgproto3.BackendKeyData
@@ -35,7 +35,7 @@ type TestSession struct {
 	mu           sync.RWMutex
 }
 
-type PGTest struct {
+type PgRollback struct {
 	SessionsByTestID  map[string]*TestSession
 	PostgresHost      string
 	PostgresPort      int
@@ -44,14 +44,14 @@ type PGTest struct {
 	PostgresPass      string
 	Timeout           time.Duration
 	SessionTimeout    time.Duration
-	KeepaliveInterval time.Duration // intervalo de ping pgtest->PostgreSQL por conexão; 0 = desligado
+	KeepaliveInterval time.Duration // intervalo de ping pgrollback->PostgreSQL por conexão; 0 = desligado
 	mu                sync.RWMutex
 
 	// backendStartupCache is filled from the first real PostgreSQL connection and replayed to clients.
 	backendStartupCache *BackendStartupCache
 }
 
-func (p *PGTest) GetTestID(session *TestSession) string {
+func (p *PgRollback) GetTestID(session *TestSession) string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	for testID, s := range p.SessionsByTestID {
@@ -62,8 +62,8 @@ func (p *PGTest) GetTestID(session *TestSession) string {
 	return ""
 }
 
-func NewPGTest(postgresHost string, postgresPort int, postgresDB, postgresUser, postgresPass string, timeout time.Duration, sessionTimeout time.Duration, keepaliveInterval time.Duration) *PGTest {
-	return &PGTest{
+func NewPgRollback(postgresHost string, postgresPort int, postgresDB, postgresUser, postgresPass string, timeout time.Duration, sessionTimeout time.Duration, keepaliveInterval time.Duration) *PgRollback {
+	return &PgRollback{
 		SessionsByTestID:  make(map[string]*TestSession),
 		PostgresHost:      postgresHost,
 		PostgresPort:      postgresPort,
@@ -89,7 +89,7 @@ func NewPGTest(postgresHost string, postgresPort int, postgresDB, postgresUser, 
 //
 // IMPORTANTE: O mesmo testID sempre usa a mesma conexão porque há apenas uma sessão por testID,
 // e a sessão guarda sua DB (connection + transaction). Tudo fica sob TestSession, indexado por testID.
-func (p *PGTest) GetOrCreateSession(testID string) (*TestSession, error) {
+func (p *PgRollback) GetOrCreateSession(testID string) (*TestSession, error) {
 	p.mu.Lock()
 	defer func() {
 		p.mu.TryLock()
@@ -123,13 +123,13 @@ func (p *PGTest) GetOrCreateSession(testID string) (*TestSession, error) {
 	return session, nil
 }
 
-func (p *PGTest) GetSession(testID string) *TestSession {
+func (p *PgRollback) GetSession(testID string) *TestSession {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.SessionsByTestID[testID]
 }
 
-func (p *PGTest) GetAllSessions() map[string]*TestSession {
+func (p *PgRollback) GetAllSessions() map[string]*TestSession {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -142,7 +142,7 @@ func (p *PGTest) GetAllSessions() map[string]*TestSession {
 
 // createNewSession cria uma nova sessão para o testID.
 // Só é chamada quando não existe sessão para este testID; a conexão fica na sessão.
-func (p *PGTest) createNewSession(testID string) (*TestSession, error) {
+func (p *PgRollback) createNewSession(testID string) (*TestSession, error) {
 	if testID == "" {
 		return nil, fmt.Errorf("testID is required to create a new session")
 	}
@@ -179,7 +179,7 @@ func (p *PGTest) createNewSession(testID string) (*TestSession, error) {
 // fillBackendStartupCacheIfNeeded copies ParameterStatus from the real PostgreSQL connection into the
 // cache so we can replay them to clients. Called when creating a new session; only fills once.
 // BackendKeyData is not exposed by pgx PgConn, so we keep a default value.
-func (p *PGTest) fillBackendStartupCacheIfNeeded(pgConn *pgconn.PgConn) {
+func (p *PgRollback) fillBackendStartupCacheIfNeeded(pgConn *pgconn.PgConn) {
 	if pgConn == nil {
 		return
 	}
@@ -200,7 +200,7 @@ func (p *PGTest) fillBackendStartupCacheIfNeeded(pgConn *pgconn.PgConn) {
 }
 
 // GetBackendStartupCache returns the cached backend startup messages from the real PostgreSQL, or nil if not yet filled.
-func (p *PGTest) GetBackendStartupCache() *BackendStartupCache {
+func (p *PgRollback) GetBackendStartupCache() *BackendStartupCache {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.backendStartupCache
@@ -226,7 +226,7 @@ func isConnClosedOrFatal(err error) bool {
 // fecha a conexão da sessão e remove do mapa.
 // Se a conexão com o PostgreSQL já estiver morta (ex.: timeout), remove a sessão
 // do estado e retorna nil para o cliente ter sucesso (a tarefa "encerrar sessão" foi cumprida).
-func (p *PGTest) DestroySession(testID string) error {
+func (p *PgRollback) DestroySession(testID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -250,8 +250,8 @@ func (p *PGTest) DestroySession(testID string) error {
 	return nil
 }
 
-// RollbackBaseTransaction runs ROLLBACK and begins a new transaction on the session (used by "pgtest rollback").
-func (p *PGTest) RollbackBaseTransaction(testID string) (string, error) {
+// RollbackBaseTransaction runs ROLLBACK and begins a new transaction on the session (used by "pgrollback rollback").
+func (p *PgRollback) RollbackBaseTransaction(testID string) (string, error) {
 	session := p.GetSession(testID)
 	if session == nil {
 		return "", fmt.Errorf("session not found for test_id: '%s'", testID)
@@ -261,11 +261,11 @@ func (p *PGTest) RollbackBaseTransaction(testID string) (string, error) {
 
 // RollbackSession é um alias para DestroySession mantido para compatibilidade.
 // Deprecated: Use DestroySession em vez disso.
-func (p *PGTest) RollbackSession(testID string) error {
+func (p *PgRollback) RollbackSession(testID string) error {
 	return p.DestroySession(testID)
 }
 
-func (p *PGTest) CleanupExpiredSessions() int {
+func (p *PgRollback) CleanupExpiredSessions() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -293,15 +293,15 @@ func (p *PGTest) CleanupExpiredSessions() int {
 	return cleaned
 }
 
-func (p *PGTest) getAdvisoryLockKey(session *TestSession) int64 {
+func (p *PgRollback) getAdvisoryLockKey(session *TestSession) int64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	hash := fnv.New64a()
-	hash.Write([]byte("pgtest_" + p.GetTestID(session)))
+	hash.Write([]byte("pgrollback_" + p.GetTestID(session)))
 	return int64(hash.Sum64())
 }
 
-func (p *PGTest) acquireAdvisoryLock(session *TestSession) error {
+func (p *PgRollback) acquireAdvisoryLock(session *TestSession) error {
 	if session.DB == nil {
 		return fmt.Errorf("session DB is nil for session %s", p.GetTestID(session))
 	}
@@ -309,7 +309,7 @@ func (p *PGTest) acquireAdvisoryLock(session *TestSession) error {
 	return session.DB.acquireAdvisoryLock(context.Background(), lockKey)
 }
 
-func (p *PGTest) releaseAdvisoryLock(session *TestSession) error {
+func (p *PgRollback) releaseAdvisoryLock(session *TestSession) error {
 	if session.DB == nil {
 		return fmt.Errorf("session DB is nil for session %s", p.GetTestID(session))
 	}
@@ -317,7 +317,7 @@ func (p *PGTest) releaseAdvisoryLock(session *TestSession) error {
 	return session.DB.releaseAdvisoryLock(context.Background(), lockKey)
 }
 
-func (p *PGTest) ExecuteWithLock(session *TestSession, query string) error {
+func (p *PgRollback) ExecuteWithLock(session *TestSession, query string) error {
 	if session.DB == nil {
 		return fmt.Errorf("session DB is nil for session %s", p.GetTestID(session))
 	}
@@ -343,9 +343,9 @@ func (p *PGTest) ExecuteWithLock(session *TestSession, query string) error {
 // - Savepoints subsequentes permitem rollback parcial dentro da mesma conexão
 //
 // Caso de uso PHP:
-// - PHP conecta → executa BEGIN → cria savepoint pgtest_v_1 (ponto de início)
-// - PHP faz comandos → executa BEGIN novamente → cria savepoint pgtest_v_2
-// - PHP executa ROLLBACK → faz rollback até pgtest_v_2 (não afeta pgtest_v_1)
+// - PHP conecta → executa BEGIN → cria savepoint pgrollback_v_1 (ponto de início)
+// - PHP faz comandos → executa BEGIN novamente → cria savepoint pgrollback_v_2
+// - PHP executa ROLLBACK → faz rollback até pgrollback_v_2 (não afeta pgrollback_v_1)
 // - PHP desconecta → próxima conexão PHP com mesmo testID pode continuar de onde parou
 func (s *TestSession) handleBegin(testID string, connID ConnectionID) (string, error) {
 	s.mu.RLock()
@@ -385,7 +385,7 @@ func (s *TestSession) handleRollback(testID string) (string, error) {
 	return s.DB.handleRollback(testID)
 }
 
-// RollbackBaseTransaction runs ROLLBACK and begins a new transaction on the session (used by "pgtest rollback").
+// RollbackBaseTransaction runs ROLLBACK and begins a new transaction on the session (used by "pgrollback rollback").
 // Returns FULLROLLBACK_SENTINEL so the proxy sends exactly one CommandComplete+ReadyForQuery without
 // forwarding to the DB, avoiding response attribution issues with the next query (e.g. ResetSession ping).
 func (s *TestSession) RollbackBaseTransaction(testID string) (string, error) {

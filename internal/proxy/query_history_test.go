@@ -48,11 +48,11 @@ func TestIsInternalNoiseQuery_Deallocate(t *testing.T) {
 func TestIsInternalNoiseQuery_ReleaseSavepointIsNotNoise(t *testing.T) {
 	// RELEASE SAVEPOINT is a real user query, not noise
 	cases := []string{
-		"RELEASE SAVEPOINT pgtest_v_1",
-		"release savepoint pgtest_v_42",
+		"RELEASE SAVEPOINT pgrollback_v_1",
+		"release savepoint pgrollback_v_42",
 		"RELEASE SAVEPOINT user_sp_1",
-		"SAVEPOINT pgtest_v_1",
-		"ROLLBACK TO SAVEPOINT pgtest_v_1",
+		"SAVEPOINT pgrollback_v_1",
+		"ROLLBACK TO SAVEPOINT pgrollback_v_1",
 	}
 	for _, q := range cases {
 		if isInternalNoiseQuery(q) {
@@ -70,7 +70,7 @@ func TestIsInternalNoiseQuery_RegularQueries(t *testing.T) {
 		"BEGIN",
 		"COMMIT",
 		"ROLLBACK",
-		"SAVEPOINT pgtest_v_1",
+		"SAVEPOINT pgrollback_v_1",
 		"set search_path to \"public\"",
 	}
 	for _, q := range regular {

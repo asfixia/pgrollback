@@ -98,7 +98,7 @@ func connectToProxyServer(t *testing.T, ctx context.Context, host string, port i
 		err := db.PingContext(pingCtx)
 		pingCancel()
 		if err == nil {
-			t.Logf("Successfully connected and pinged pgtest server")
+			t.Logf("Successfully connected and pinged pgrollback server")
 			return db
 		}
 		lastErr = err

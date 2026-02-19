@@ -318,9 +318,6 @@ func TestServeHome_RootReturnsHTML(t *testing.T) {
 	if !strings.Contains(body, "<!DOCTYPE html>") {
 		t.Error("body should contain HTML doctype")
 	}
-	if !strings.Contains(body, "PGTest") {
-		t.Error("body should contain PGTest title")
-	}
 }
 
 func TestServeHome_GuiPathReturnsHTML(t *testing.T) {

@@ -1,4 +1,4 @@
-// Funções utilitárias para testes de integração do pgtest.
+// Funções utilitárias para testes de integração do pgrollback.
 // Este arquivo contém todas as funções auxiliares usadas pelos testes,
 // separadas do código de teste propriamente dito para melhor organização.
 package integration
@@ -19,7 +19,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-var pgtestConfig *config.Config
+var pgrollbackConfig *config.Config
 
 func init() {
 	configPath := testutil.ConfigPath()
@@ -29,49 +29,49 @@ func init() {
 		os.Exit(1)
 	}
 
-	pgtestConfig = cfg
+	pgrollbackConfig = cfg
 }
 
 func getConfig() *config.Config {
-	return pgtestConfig
+	return pgrollbackConfig
 }
 
 // --- Configuração e DSN ---
 
 // getTestSchema retorna o schema configurado para testes, ou "public" como padrão
 func getTestSchema() string {
-	if pgtestConfig != nil && pgtestConfig.Test.Schema != "" {
-		return pgtestConfig.Test.Schema
+	if pgrollbackConfig != nil && pgrollbackConfig.Test.Schema != "" {
+		return pgrollbackConfig.Test.Schema
 	}
 	return "public"
 }
 
-// getPGTestProxyDSN retorna o DSN para conectar ao servidor intermediário pgtest (proxy)
-func getPGTestProxyDSN(testID string) string {
-	// Usa o host do proxy pgtest, não do PostgreSQL real
-	host := pgtestConfig.Proxy.ListenHost
+// getPgRollbackProxyDSN retorna o DSN para conectar ao servidor intermediário pgrollback (proxy)
+func getPgRollbackProxyDSN(testID string) string {
+	// Usa o host do proxy pgrollback, não do PostgreSQL real
+	host := pgrollbackConfig.Proxy.ListenHost
 	if host == "" {
 		host = "localhost"
 	}
 	// As credenciais e database vêm do PostgreSQL real (o proxy repassa)
-	user := pgtestConfig.Postgres.User
+	user := pgrollbackConfig.Postgres.User
 	if user == "" {
 		user = "postgres"
 	}
-	password := pgtestConfig.Postgres.Password
-	dbname := pgtestConfig.Postgres.Database
+	password := pgrollbackConfig.Postgres.Password
+	dbname := pgrollbackConfig.Postgres.Database
 	if dbname == "" {
 		dbname = "postgres"
 	}
-	pgtestListenPort := pgtestConfig.Proxy.ListenPort
-	// Conecta ao proxy pgtest na porta configurada
-	return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable application_name=pgtest_%s",
-		host, pgtestListenPort, user, password, dbname, testID)
+	pgrollbackListenPort := pgrollbackConfig.Proxy.ListenPort
+	// Conecta ao proxy pgrollback na porta configurada
+	return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable application_name=pgrollback_%s",
+		host, pgrollbackListenPort, user, password, dbname, testID)
 }
 
 // getRealPostgresDSN retorna o DSN para conectar diretamente ao servidor PostgreSQL real
-// (sem passar pelo proxy pgtest)
-// Usa variáveis de ambiente se disponíveis, caso contrário usa a configuração do pgtest.yaml
+// (sem passar pelo proxy pgrollback)
+// Usa variáveis de ambiente se disponíveis, caso contrário usa a configuração do pgrollback.yaml
 func getRealPostgresDSN(t *testing.T) string {
 	host := os.Getenv("POSTGRES_HOST")
 	port := os.Getenv("POSTGRES_PORT")
@@ -79,34 +79,34 @@ func getRealPostgresDSN(t *testing.T) string {
 	pass := os.Getenv("POSTGRES_PASSWORD")
 	db := os.Getenv("POSTGRES_DB")
 
-	// Se variáveis de ambiente não estão configuradas, usa a configuração do pgtest.yaml
+	// Se variáveis de ambiente não estão configuradas, usa a configuração do pgrollback.yaml
 	if host == "" || port == "" || user == "" || db == "" {
-		if pgtestConfig == nil {
-			t.Fatalf("POSTGRES_* environment variables or pgtest.yaml config required for direct PostgreSQL connection")
+		if pgrollbackConfig == nil {
+			t.Fatalf("POSTGRES_* environment variables or pgrollback.yaml config required for direct PostgreSQL connection")
 		}
 		if host == "" {
-			host = pgtestConfig.Postgres.Host
+			host = pgrollbackConfig.Postgres.Host
 			if host == "" {
 				host = "localhost"
 			}
 		}
 		if port == "" {
-			port = fmt.Sprintf("%d", pgtestConfig.Postgres.Port)
+			port = fmt.Sprintf("%d", pgrollbackConfig.Postgres.Port)
 			if port == "0" {
 				port = "5432"
 			}
 		}
 		if user == "" {
-			user = pgtestConfig.Postgres.User
+			user = pgrollbackConfig.Postgres.User
 			if user == "" {
 				user = "postgres"
 			}
 		}
 		if pass == "" {
-			pass = pgtestConfig.Postgres.Password
+			pass = pgrollbackConfig.Postgres.Password
 		}
 		if db == "" {
-			db = pgtestConfig.Postgres.Database
+			db = pgrollbackConfig.Postgres.Database
 			if db == "" {
 				db = "postgres"
 			}
@@ -127,7 +127,7 @@ func pingConnection(t *testing.T, db *sql.DB) {
 }
 
 // connectToRealPostgres cria uma conexão direta ao servidor PostgreSQL real (sem passar pelo proxy).
-// Esta conexão está fora da transação gerenciada pelo pgtest e permite verificar o estado real do banco.
+// Esta conexão está fora da transação gerenciada pelo pgrollback e permite verificar o estado real do banco.
 // Estabelece a conexão imediatamente e retorna o *sql.DB configurado.
 func connectToRealPostgres(t *testing.T) *sql.DB {
 	t.Helper()
@@ -143,46 +143,46 @@ func connectToRealPostgres(t *testing.T) *sql.DB {
 	return postgresDBDirect
 }
 
-// connectToPGTestProxy cria uma conexão ao servidor intermediário pgtest (proxy)
+// connectToPgRollbackProxy cria uma conexão ao servidor intermediário pgrollback (proxy)
 // Retorna a conexão e um erro, se houver
 // IMPORTANTE: Configura o pool para usar apenas 1 conexão para garantir que todas
-// as operações usem a mesma conexão TCP ao pgtest, evitando problemas de sincronização
-func connectToPGTestProxy(t *testing.T, testID string) *sql.DB {
+// as operações usem a mesma conexão TCP ao pgrollback, evitando problemas de sincronização
+func connectToPgRollbackProxy(t *testing.T, testID string) *sql.DB {
 	t.Helper()
-	pgtestProxyDSN := getPGTestProxyDSN(testID)
-	pgtestDB, err := sql.Open("pgx", pgtestProxyDSN)
+	pgrollbackProxyDSN := getPgRollbackProxyDSN(testID)
+	pgrollbackDB, err := sql.Open("pgx", pgrollbackProxyDSN)
 	if err != nil {
-		t.Fatalf("Failed to connect to PGTest proxy: %v", err)
+		t.Fatalf("Failed to connect to PgRollback proxy: %v", err)
 	}
 
 	// Estabelece a conexão TCP imediatamente (sql.Open é lazy)
 	// Isso faz com que o servidor receba a conexão e logue "[SERVER] Nova conexão TCP recebida de ..."
-	pingConnection(t, pgtestDB)
+	pingConnection(t, pgrollbackDB)
 
-	//// Garante que usamos apenas 1 conexão TCP ao pgtest
+	//// Garante que usamos apenas 1 conexão TCP ao pgrollback
 	//// Isso evita que o database/sql crie múltiplas conexões TCP, cada uma com seu
 	//// próprio proxyConnection, o que pode causar problemas de sincronização
-	//pgtestDB.SetMaxOpenConns(1)
-	//pgtestDB.SetMaxIdleConns(1)
-	//pgtestDB.SetConnMaxLifetime(0) // Conexões não expiram
+	//pgrollbackDB.SetMaxOpenConns(1)
+	//pgrollbackDB.SetMaxIdleConns(1)
+	//pgrollbackDB.SetConnMaxLifetime(0) // Conexões não expiram
 
-	return pgtestDB
+	return pgrollbackDB
 }
 
-// connectToPGTestProxySingleConn is like connectToPGTestProxy but forces a single connection
+// connectToPgRollbackProxySingleConn is like connectToPgRollbackProxy but forces a single connection
 // (MaxOpenConns(1)). Used by repro tests to rule out pool reordering.
-func connectToPGTestProxySingleConn(t *testing.T, testID string) *sql.DB {
+func connectToPgRollbackProxySingleConn(t *testing.T, testID string) *sql.DB {
 	t.Helper()
-	pgtestProxyDSN := getPGTestProxyDSN(testID)
-	pgtestDB, err := sql.Open("pgx", pgtestProxyDSN)
+	pgrollbackProxyDSN := getPgRollbackProxyDSN(testID)
+	pgrollbackDB, err := sql.Open("pgx", pgrollbackProxyDSN)
 	if err != nil {
-		t.Fatalf("Failed to connect to PGTest proxy: %v", err)
+		t.Fatalf("Failed to connect to PgRollback proxy: %v", err)
 	}
-	pingConnection(t, pgtestDB)
-	pgtestDB.SetMaxOpenConns(1)
-	pgtestDB.SetMaxIdleConns(1)
-	pgtestDB.SetConnMaxLifetime(0)
-	return pgtestDB
+	pingConnection(t, pgrollbackDB)
+	pgrollbackDB.SetMaxOpenConns(1)
+	pgrollbackDB.SetMaxIdleConns(1)
+	pgrollbackDB.SetConnMaxLifetime(0)
+	return pgrollbackDB
 }
 
 // pingWithTimeout executa um ping na conexão com timeout separado.
@@ -300,7 +300,7 @@ func assertTableRowCount(t *testing.T, db *sql.DB, tableName string, expectedCou
 func execBegin(t *testing.T, db *sql.DB, contextMsg string) bool {
 	t.Helper()
 
-	// Executa BEGIN - o pgtest converterá em SAVEPOINT
+	// Executa BEGIN - o pgrollback converterá em SAVEPOINT
 	// O Exec() do database/sql já aguarda a resposta completa (CommandComplete + ReadyForQuery)
 	// antes de retornar, então não precisamos de sincronização adicional
 	result, err := db.Exec("BEGIN")
@@ -341,7 +341,7 @@ func createTableWithValueColumn(t *testing.T, db *sql.DB, tableName string) {
 
 // insertOneRow insere uma linha na tabela com coluna value (id SERIAL PRIMARY KEY, value TEXT).
 // Executa INSERT INTO tableName (value) VALUES (value), trata erro e exige RowsAffected == 1.
-// Usa interpolação na string (não $1) porque o proxy pgtest encaminha em modo simple query, que não suporta parâmetros bound.
+// Usa interpolação na string (não $1) porque o proxy pgrollback encaminha em modo simple query, que não suporta parâmetros bound.
 // contextMessage é opcional e será incluído nas mensagens de erro para identificar onde no teste falhou.
 // Usa a função unificada do pacote testutil.
 func insertOneRow(t *testing.T, db *sql.DB, tableName string, value string, contextMessage string) {
@@ -361,7 +361,7 @@ func insertDuplicateRow(t *testing.T, db *sql.DB, tableName string, id int, valu
 	t.Logf("SUCCESS: Duplicate key error correctly detected: %v", err)
 }
 
-// execCommit executa COMMIT. No pgtest isso vira RELEASE SAVEPOINT.
+// execCommit executa COMMIT. No pgrollback isso vira RELEASE SAVEPOINT.
 // Falha se houver erro ou se RowsAffected != 0 (comando de controle não altera linhas).
 func execCommit(t *testing.T, db *sql.DB) {
 	t.Helper()
@@ -375,8 +375,8 @@ func execCommit(t *testing.T, db *sql.DB) {
 	}
 }
 
-// execRollback envia ROLLBACK ao pgtest (que pode bloqueá-lo).
-// Apenas loga o resultado; usa quando se espera que ROLLBACK seja bloqueado pelo pgtest.
+// execRollback envia ROLLBACK ao pgrollback (que pode bloqueá-lo).
+// Apenas loga o resultado; usa quando se espera que ROLLBACK seja bloqueado pelo pgrollback.
 func execRollback(t *testing.T, db *sql.DB) {
 	t.Helper()
 	_, err := db.Exec("ROLLBACK")
@@ -408,33 +408,33 @@ func execExpectError(t *testing.T, db *sql.DB, sql string, contextMessage string
 	t.Logf("SUCCESS: %s: SQL correctly failed: %v", contextMessage, err)
 }
 
-// execPgtestRollback envia "pgtest rollback" e loga em caso de erro (não falha o teste).
+// execPgRollbackRollback envia "pgrollback rollback" e loga em caso de erro (não falha o teste).
 // Use para limpeza no fim do teste ou quando o sucesso do rollback não é assertado.
-func execPgtestRollback(t *testing.T, db *sql.DB) {
+func execPgRollbackRollback(t *testing.T, db *sql.DB) {
 	t.Helper()
-	_, err := db.Exec("pgtest rollback")
+	_, err := db.Exec("pgrollback rollback")
 	if err != nil {
-		logger.Warn("Rollback via pgtest command failed: %v", err)
-		t.Logf("pgtest rollback: %v", err)
+		logger.Warn("Rollback via pgrollback command failed: %v", err)
+		t.Logf("pgrollback rollback: %v", err)
 	}
 }
 
-// execPgTestFullRollback envia "pgtest rollback" e falha o teste se der erro.
-func execPgTestFullRollback(t *testing.T, db *sql.DB) {
+// execPgRollbackFullRollback envia "pgrollback rollback" e falha o teste se der erro.
+func execPgRollbackFullRollback(t *testing.T, db *sql.DB) {
 	t.Helper()
-	_, err := db.Exec("pgtest rollback")
+	_, err := db.Exec("pgrollback rollback")
 	if err != nil {
-		t.Fatalf("Rollback via pgtest command failed: %v", err)
+		t.Fatalf("Rollback via pgrollback command failed: %v", err)
 	}
 }
 
-// execPgtestBegin executa "pgtest begin" para iniciar uma transação explícita no pgtest.
+// execPgRollbackBegin executa "pgrollback begin" para iniciar uma transação explícita no pgrollback.
 // Falha o teste se der erro. O testID já deve estar na connection string (application_name).
-func execPgtestBegin(t *testing.T, db *sql.DB) {
+func execPgRollbackBegin(t *testing.T, db *sql.DB) {
 	t.Helper()
-	_, err := db.Exec("pgtest begin")
+	_, err := db.Exec("pgrollback begin")
 	if err != nil {
-		t.Fatalf("Failed to start transaction via pgtest begin: %v", err)
+		t.Fatalf("Failed to start transaction via pgrollback begin: %v", err)
 	}
 }
 

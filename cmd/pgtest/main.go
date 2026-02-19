@@ -56,7 +56,7 @@ func main() {
 	}
 
 	guiURL := fmt.Sprintf("http://%s:%d/", cfg.Proxy.ListenHost, cfg.Proxy.ListenPort)
-	log.Printf("PGTest server started on port %d", cfg.Proxy.ListenPort)
+	log.Printf("PgRollback server started on port %d", cfg.Proxy.ListenPort)
 	log.Printf("GUI: %s", guiURL)
 
 	// System tray icon blocks the main goroutine until the user clicks Quit.

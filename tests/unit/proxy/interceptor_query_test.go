@@ -26,20 +26,20 @@ func assertReleaseSavepointQuery(t *testing.T, query string, expectedLevel int) 
 }
 
 func TestHandleBegin(t *testing.T) {
-	pgtest := newPGTestFromConfig()
-	session, err := pgtest.GetOrCreateSession("empty123")
+	pgrollback := newPgRollbackFromConfig()
+	session, err := pgrollback.GetOrCreateSession("empty123")
 	if err != nil {
 		t.Fatalf("Failed to create the session for testing BEGIN")
 	}
 
 	if session.DB == nil {
-		t.Fatalf("Error Session has no DB connection on ID: %s", pgtest.GetTestID(session))
+		t.Fatalf("Error Session has no DB connection on ID: %s", pgrollback.GetTestID(session))
 	}
 	if !session.DB.HasActiveTransaction() {
 		t.Fatalf("Session has no active transaction")
 	}
 
-	query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "BEGIN", testConnectionID)
+	query, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "BEGIN", testConnectionID)
 	if err != nil {
 		t.Fatalf("InterceptQuery(BEGIN) error = %v", err)
 	}
@@ -57,7 +57,7 @@ func TestHandleBegin(t *testing.T) {
 	}
 
 	// Second BEGIN is no-op (single level): returns DEFAULT_SELECT_ONE, level stays 1.
-	query2, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "BEGIN", testConnectionID)
+	query2, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "BEGIN", testConnectionID)
 	if err != nil {
 		t.Fatalf("InterceptQuery(BEGIN) error = %v", err)
 	}
@@ -69,15 +69,15 @@ func TestHandleBegin(t *testing.T) {
 }
 
 func TestHandleCommit(t *testing.T) {
-	pgtest := newPGTestFromConfig()
+	pgrollback := newPgRollbackFromConfig()
 
-	session := newTestSessionWithLevel(pgtest, "test123")
+	session := newTestSessionWithLevel(pgrollback, "test123")
 	if session == nil {
 		t.Fatalf("Failed to create a session with the given levels")
 	}
 	t.Run("commit_savepoint_when_level_gt_0", func(t *testing.T) {
 
-		query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "COMMIT", testSetupConnectionID)
+		query, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "COMMIT", testSetupConnectionID)
 		if err != nil {
 			t.Fatalf("InterceptQuery(COMMIT) error = %v", err)
 		}
@@ -95,12 +95,12 @@ func TestHandleCommit(t *testing.T) {
 	})
 
 	t.Run("block_commit_when_level_eq_0", func(t *testing.T) {
-		session, err := pgtest.GetOrCreateSession("otherId")
+		session, err := pgrollback.GetOrCreateSession("otherId")
 		if err != nil {
 			t.Fatalf("Failed to get the new Session")
 		}
 
-		query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "COMMIT", testSetupConnectionID)
+		query, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "COMMIT", testSetupConnectionID)
 		if err != nil {
 			t.Fatalf("InterceptQuery(COMMIT) error = %v", err)
 		}
@@ -116,12 +116,12 @@ func TestHandleCommit(t *testing.T) {
 }
 
 func TestHandleRollback(t *testing.T) {
-	pgtest := newPGTestFromConfig()
+	pgrollback := newPgRollbackFromConfig()
 
 	t.Run("rollback_to_savepoint_when_level_gt_0", func(t *testing.T) {
-		session := newTestSessionWithLevel(pgtest, "test123")
+		session := newTestSessionWithLevel(pgrollback, "test123")
 
-		query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "ROLLBACK", testSetupConnectionID)
+		query, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "ROLLBACK", testSetupConnectionID)
 		if err != nil {
 			t.Fatalf("InterceptQuery(ROLLBACK) error = %v", err)
 		}
@@ -146,12 +146,12 @@ func TestHandleRollback(t *testing.T) {
 	})
 
 	t.Run("block_rollback_when_level_eq_0", func(t *testing.T) {
-		session, err := pgtest.GetOrCreateSession("fakeId")
+		session, err := pgrollback.GetOrCreateSession("fakeId")
 		if err != nil {
 			t.Fatalf("Failed to get the new Session")
 		}
 
-		query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "ROLLBACK", testSetupConnectionID)
+		query, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "ROLLBACK", testSetupConnectionID)
 		if err != nil {
 			t.Fatalf("InterceptQuery(ROLLBACK) error = %v", err)
 		}
@@ -166,153 +166,153 @@ func TestHandleRollback(t *testing.T) {
 	})
 }
 
-func TestHandlePGTestCommandUnit(t *testing.T) {
-	pgtest := newPGTestFromConfig()
+func TestHandlePgRollbackCommandUnit(t *testing.T) {
+	pgrollback := newPgRollbackFromConfig()
 
 	t.Run("invalid_command", func(t *testing.T) {
-		session := newTestSession(pgtest)
-		_, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "pgtest", testSetupConnectionID)
+		session := newTestSession(pgrollback)
+		_, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "pgrollback", testSetupConnectionID)
 		if err == nil {
-			t.Error("InterceptQuery(pgtest) should return error for invalid command")
+			t.Error("InterceptQuery(pgrollback) should return error for invalid command")
 		}
 	})
 
 	t.Run("unknown_action", func(t *testing.T) {
-		session := newTestSession(pgtest)
-		_, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "pgtest unknown", testSetupConnectionID)
+		session := newTestSession(pgrollback)
+		_, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "pgrollback unknown", testSetupConnectionID)
 		if err == nil {
-			t.Error("InterceptQuery(pgtest unknown) should return error for unknown action")
+			t.Error("InterceptQuery(pgrollback unknown) should return error for unknown action")
 		}
 	})
 
 	t.Run("begin_missing_test_id", func(t *testing.T) {
 		// Cria sessão sem TestID para testar o caso de erro
 		session := &proxy.TestSession{}
-		_, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "pgtest begin", testSetupConnectionID)
+		_, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "pgrollback begin", testSetupConnectionID)
 		if err == nil {
-			t.Error("InterceptQuery(pgtest begin) should return error for missing test_id")
+			t.Error("InterceptQuery(pgrollback begin) should return error for missing test_id")
 		}
 	})
 
 	t.Run("rollback_missing_test_id", func(t *testing.T) {
 		// Cria sessão sem TestID para testar o caso de erro
 		session := &proxy.TestSession{}
-		_, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "pgtest rollback", testSetupConnectionID)
+		_, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "pgrollback rollback", testSetupConnectionID)
 		if err == nil {
-			t.Error("InterceptQuery(pgtest rollback) should return error for missing test_id")
+			t.Error("InterceptQuery(pgrollback rollback) should return error for missing test_id")
 		}
 	})
 
 	t.Run("status_missing_test_id", func(t *testing.T) {
 		// Cria sessão sem TestID para testar o caso de erro
 		session := &proxy.TestSession{}
-		_, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "pgtest status", testSetupConnectionID)
+		_, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "pgrollback status", testSetupConnectionID)
 		if err == nil {
-			t.Error("InterceptQuery(pgtest status) should return error for missing test_id")
+			t.Error("InterceptQuery(pgrollback status) should return error for missing test_id")
 		}
 	})
 
-	t.Run("pgtest_begin_success", func(t *testing.T) {
-		testID := "test_pgtest_begin"
+	t.Run("pgrollback_begin_success", func(t *testing.T) {
+		testID := "test_pgrollback_begin"
 		// Cria sessão com o testID que será usado pelo comando
-		session, err := pgtest.GetOrCreateSession(testID)
+		session, err := pgrollback.GetOrCreateSession(testID)
 		if err != nil {
 			t.Skip("Skipping test - requires PostgreSQL connection")
 		}
 		// Usa o testID da sessão (não passa como parâmetro)
-		query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "pgtest begin", testSetupConnectionID)
+		query, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "pgrollback begin", testSetupConnectionID)
 		if err != nil {
-			t.Fatalf("InterceptQuery(pgtest begin) error = %v", err)
+			t.Fatalf("InterceptQuery(pgrollback begin) error = %v", err)
 		}
 		if query != DEFAULT_SELECT_ONE {
-			t.Errorf("InterceptQuery(pgtest begin) = %v, want %s", query, DEFAULT_SELECT_ONE)
+			t.Errorf("InterceptQuery(pgrollback begin) = %v, want %s", query, DEFAULT_SELECT_ONE)
 		}
 		// Verifica que a sessão foi criada/reutilizada
-		createdSession := pgtest.GetSession(testID)
+		createdSession := pgrollback.GetSession(testID)
 		if createdSession == nil {
-			t.Error("Session should exist after pgtest begin")
+			t.Error("Session should exist after pgrollback begin")
 		}
 	})
 
-	t.Run("pgtest_rollback_success", func(t *testing.T) {
-		testID := "test_pgtest_rollback"
+	t.Run("pgrollback_rollback_success", func(t *testing.T) {
+		testID := "test_pgrollback_rollback"
 		// Primeiro cria a sessão
-		session, err := pgtest.GetOrCreateSession(testID)
+		session, err := pgrollback.GetOrCreateSession(testID)
 		if err != nil {
 			t.Skip("Skipping test - requires PostgreSQL connection")
 		}
 		// Depois faz rollback usando o testID da sessão (não passa como parâmetro)
-		query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "pgtest rollback", testSetupConnectionID)
+		query, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "pgrollback rollback", testSetupConnectionID)
 		if err != nil {
-			t.Fatalf("InterceptQuery(pgtest rollback) error = %v", err)
+			t.Fatalf("InterceptQuery(pgrollback rollback) error = %v", err)
 		}
 		if query != FULLROLLBACK_SENTINEL {
-			t.Errorf("InterceptQuery(pgtest rollback) = %v, want %s", query, FULLROLLBACK_SENTINEL)
+			t.Errorf("InterceptQuery(pgrollback rollback) = %v, want %s", query, FULLROLLBACK_SENTINEL)
 		}
 		// Verifica que a sessão ainda existe (rollback não remove a sessão, apenas reconecta)
 		// A sessão é mantida, apenas a conexão é recriada
-		removedSession := pgtest.GetSession(testID)
+		removedSession := pgrollback.GetSession(testID)
 		if removedSession == nil {
-			t.Error("Session should still exist after pgtest rollback (connection is recreated, not session removed)")
+			t.Error("Session should still exist after pgrollback rollback (connection is recreated, not session removed)")
 		}
 	})
 
-	t.Run("pgtest_status_success", func(t *testing.T) {
-		testID := "test_pgtest_status"
+	t.Run("pgrollback_status_success", func(t *testing.T) {
+		testID := "test_pgrollback_status"
 		// Primeiro cria a sessão
-		session, err := pgtest.GetOrCreateSession(testID)
+		session, err := pgrollback.GetOrCreateSession(testID)
 		if err != nil {
 			t.Skip("Skipping test - requires PostgreSQL connection")
 		}
 		// Depois verifica status usando o testID da sessão (não passa como parâmetro)
-		query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "pgtest status", testSetupConnectionID)
+		query, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "pgrollback status", testSetupConnectionID)
 		if err != nil {
-			t.Fatalf("InterceptQuery(pgtest status) error = %v", err)
+			t.Fatalf("InterceptQuery(pgrollback status) error = %v", err)
 		}
 		if !contains(query, "SELECT") || !contains(query, "test_id") {
-			t.Errorf("InterceptQuery(pgtest status) = %v, want SELECT query with test_id", query)
+			t.Errorf("InterceptQuery(pgrollback status) = %v, want SELECT query with test_id", query)
 		}
 	})
 
-	t.Run("pgtest_list_success", func(t *testing.T) {
+	t.Run("pgrollback_list_success", func(t *testing.T) {
 		testID1 := "test_list_1"
 		testID2 := "test_list_2"
 		// Cria algumas sessões
-		_, err1 := pgtest.GetOrCreateSession(testID1)
-		_, err2 := pgtest.GetOrCreateSession(testID2)
+		_, err1 := pgrollback.GetOrCreateSession(testID1)
+		_, err2 := pgrollback.GetOrCreateSession(testID2)
 		if err1 != nil || err2 != nil {
 			t.Skip("Skipping test - requires PostgreSQL connection")
 		}
 		// Depois lista (não precisa de testID, lista todas)
-		session := newTestSession(pgtest)
-		query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "pgtest list", testSetupConnectionID)
+		session := newTestSession(pgrollback)
+		query, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "pgrollback list", testSetupConnectionID)
 		if err != nil {
-			t.Fatalf("InterceptQuery(pgtest list) error = %v", err)
+			t.Fatalf("InterceptQuery(pgrollback list) error = %v", err)
 		}
 		if !contains(query, "SELECT") || !contains(query, "test_id") {
-			t.Errorf("InterceptQuery(pgtest list) = %v, want SELECT query with test_id", query)
+			t.Errorf("InterceptQuery(pgrollback list) = %v, want SELECT query with test_id", query)
 		}
 	})
 
-	t.Run("pgtest_cleanup_success", func(t *testing.T) {
-		session := newTestSession(pgtest)
-		query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "pgtest cleanup", testSetupConnectionID)
+	t.Run("pgrollback_cleanup_success", func(t *testing.T) {
+		session := newTestSession(pgrollback)
+		query, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "pgrollback cleanup", testSetupConnectionID)
 		if err != nil {
-			t.Fatalf("InterceptQuery(pgtest cleanup) error = %v", err)
+			t.Fatalf("InterceptQuery(pgrollback cleanup) error = %v", err)
 		}
 		if !contains(query, "SELECT") || !contains(query, "cleaned") {
-			t.Errorf("InterceptQuery(pgtest cleanup) = %v, want SELECT query with cleaned", query)
+			t.Errorf("InterceptQuery(pgrollback cleanup) = %v, want SELECT query with cleaned", query)
 		}
 	})
 }
 
 func TestInterceptQuery_NormalQueries(t *testing.T) {
-	pgtest := newPGTestFromConfig()
-	session := newTestSession(pgtest)
+	pgrollback := newPgRollbackFromConfig()
+	session := newTestSession(pgrollback)
 
 	t.Run("select_query_passes_through", func(t *testing.T) {
 		originalQuery := "SELECT * FROM users WHERE id = 1"
-		query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), originalQuery, testSetupConnectionID)
+		query, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), originalQuery, testSetupConnectionID)
 		if err != nil {
 			t.Fatalf("InterceptQuery(SELECT) error = %v", err)
 		}
@@ -323,7 +323,7 @@ func TestInterceptQuery_NormalQueries(t *testing.T) {
 
 	t.Run("insert_query_passes_through", func(t *testing.T) {
 		originalQuery := "INSERT INTO users (name) VALUES ('test')"
-		query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), originalQuery, testSetupConnectionID)
+		query, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), originalQuery, testSetupConnectionID)
 		if err != nil {
 			t.Fatalf("InterceptQuery(INSERT) error = %v", err)
 		}
@@ -334,7 +334,7 @@ func TestInterceptQuery_NormalQueries(t *testing.T) {
 
 	t.Run("update_query_passes_through", func(t *testing.T) {
 		originalQuery := "UPDATE users SET name = 'updated' WHERE id = 1"
-		query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), originalQuery, testSetupConnectionID)
+		query, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), originalQuery, testSetupConnectionID)
 		if err != nil {
 			t.Fatalf("InterceptQuery(UPDATE) error = %v", err)
 		}
@@ -345,7 +345,7 @@ func TestInterceptQuery_NormalQueries(t *testing.T) {
 
 	t.Run("delete_query_passes_through", func(t *testing.T) {
 		originalQuery := "DELETE FROM users WHERE id = 1"
-		query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), originalQuery, testSetupConnectionID)
+		query, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), originalQuery, testSetupConnectionID)
 		if err != nil {
 			t.Fatalf("InterceptQuery(DELETE) error = %v", err)
 		}
@@ -356,7 +356,7 @@ func TestInterceptQuery_NormalQueries(t *testing.T) {
 
 	t.Run("query_with_whitespace_is_trimmed", func(t *testing.T) {
 		originalQuery := "   SELECT * FROM users   "
-		query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), originalQuery, testSetupConnectionID)
+		query, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), originalQuery, testSetupConnectionID)
 		if err != nil {
 			t.Fatalf("InterceptQuery(SELECT with whitespace) error = %v", err)
 		}
@@ -370,7 +370,7 @@ func TestInterceptQuery_NormalQueries(t *testing.T) {
 // TestInterceptQuery_Routing is a table-driven test for InterceptQuery dispatch and ROLLBACK vs ROLLBACK TO SAVEPOINT.
 // It documents when a query is passed through unchanged vs intercepted, and helps find routing bugs.
 func TestInterceptQuery_Routing(t *testing.T) {
-	pgtest := newPGTestFromConfig()
+	pgrollback := newPgRollbackFromConfig()
 
 	tests := []struct {
 		name              string
@@ -387,7 +387,7 @@ func TestInterceptQuery_Routing(t *testing.T) {
 		{name: "rollback_to_savepoint_passes_through", query: "ROLLBACK TO SAVEPOINT sp1", needSession: false, expectPassThrough: true},
 		{name: "rollback_to_savepoint_lowercase_passes_through", query: "rollback to savepoint sp1", needSession: false, expectPassThrough: true},
 		{name: "rollback_to_savepoint_no_name_passes_through", query: "ROLLBACK TO SAVEPOINT", needSession: false, expectPassThrough: true},
-		{name: "rollback_to_savepoint_whitespace_passes_through", query: "  ROLLBACK TO SAVEPOINT pgtest_v_1  ", needSession: false, expectPassThrough: true},
+		{name: "rollback_to_savepoint_whitespace_passes_through", query: "  ROLLBACK TO SAVEPOINT pgrollback_v_1  ", needSession: false, expectPassThrough: true},
 		{name: "select_rollback_in_string_passes_through", query: "SELECT 'ROLLBACK' FROM t", needSession: false, expectPassThrough: true},
 		{name: "empty_string_passes_through", query: "", needSession: false, expectPassThrough: true},
 		{name: "whitespace_only_passes_through", query: "   \t\n  ", needSession: false, expectPassThrough: true},
@@ -411,17 +411,17 @@ func TestInterceptQuery_Routing(t *testing.T) {
 				var s *proxy.TestSession
 				if tt.savepointLevel == 0 {
 					var err error
-					s, err = pgtest.GetOrCreateSession(uniqueID)
+					s, err = pgrollback.GetOrCreateSession(uniqueID)
 					if err != nil {
 						t.Fatalf("GetOrCreateSession: %v", err)
 					}
 				} else {
-					s = proxy.NewTestSessionWithLevel(pgtest, uniqueID)
+					s = proxy.NewTestSessionWithLevel(pgrollback, uniqueID)
 					if s == nil {
 						t.Fatal("failed to create session for test")
 					}
 				}
-				testID = pgtest.GetTestID(s)
+				testID = pgrollback.GetTestID(s)
 				if testID == "" {
 					t.Fatal("GetTestID returned empty")
 				}
@@ -429,7 +429,7 @@ func TestInterceptQuery_Routing(t *testing.T) {
 				testID = "no_session_needed"
 			}
 
-			got, err := pgtest.InterceptQuery(testID, tt.query, testSetupConnectionID)
+			got, err := pgrollback.InterceptQuery(testID, tt.query, testSetupConnectionID)
 
 			if tt.expectErr {
 				if err == nil {
@@ -463,11 +463,11 @@ func TestInterceptQuery_Routing(t *testing.T) {
 // TestInterceptQuery_MultipleSavepoints verifies single-level semantics: only the first BEGIN
 // creates a savepoint; further BEGINs are no-op. COMMIT/ROLLBACK when level 0 are no-op.
 func TestInterceptQuery_MultipleSavepoints(t *testing.T) {
-	pgtest := newPGTestFromConfig()
-	session := newTestSession(pgtest)
+	pgrollback := newPgRollbackFromConfig()
+	session := newTestSession(pgrollback)
 
 	// First BEGIN creates level 1
-	query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "BEGIN", testConnectionID)
+	query, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "BEGIN", testConnectionID)
 	if err != nil {
 		t.Fatalf("InterceptQuery(BEGIN) error = %v", err)
 	}
@@ -485,7 +485,7 @@ func TestInterceptQuery_MultipleSavepoints(t *testing.T) {
 
 	// Second and third BEGIN are no-op (single level)
 	for i := 2; i <= 3; i++ {
-		q, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "BEGIN", testConnectionID)
+		q, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "BEGIN", testConnectionID)
 		if err != nil {
 			t.Fatalf("InterceptQuery(BEGIN #%d) error = %v", i, err)
 		}
@@ -499,7 +499,7 @@ func TestInterceptQuery_MultipleSavepoints(t *testing.T) {
 	}
 
 	// First COMMIT (real) -> level 0
-	query, err = pgtest.InterceptQuery(pgtest.GetTestID(session), "COMMIT", testConnectionID)
+	query, err = pgrollback.InterceptQuery(pgrollback.GetTestID(session), "COMMIT", testConnectionID)
 	if err != nil {
 		t.Fatalf("InterceptQuery(COMMIT) error = %v", err)
 	}
@@ -514,7 +514,7 @@ func TestInterceptQuery_MultipleSavepoints(t *testing.T) {
 	}
 
 	// Second COMMIT is no-op (level 0)
-	qNoop, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "COMMIT", testConnectionID)
+	qNoop, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "COMMIT", testConnectionID)
 	if err != nil {
 		t.Fatalf("InterceptQuery(COMMIT at level 0) error = %v", err)
 	}
@@ -527,16 +527,16 @@ func TestInterceptQuery_MultipleSavepoints(t *testing.T) {
 }
 
 func TestExecuteWithLock(t *testing.T) {
-	pgtest := newPGTestFromConfig()
+	pgrollback := newPgRollbackFromConfig()
 	testID := "test_execute_lock"
-	session, err := pgtest.GetOrCreateSession(testID)
+	session, err := pgrollback.GetOrCreateSession(testID)
 	if err != nil {
 		t.Skip("Skipping test - requires PostgreSQL connection")
 	}
 
 	t.Run("execute_simple_query_with_lock", func(t *testing.T) {
 		query := "SELECT 1"
-		err := pgtest.ExecuteWithLock(session, query)
+		err := pgrollback.ExecuteWithLock(session, query)
 		if err != nil {
 			t.Fatalf("ExecuteWithLock(SELECT 1) error = %v", err)
 		}
@@ -544,7 +544,7 @@ func TestExecuteWithLock(t *testing.T) {
 
 	t.Run("execute_insert_with_lock", func(t *testing.T) {
 		query := "INSERT INTO test_table (id) VALUES (1)"
-		err := pgtest.ExecuteWithLock(session, query)
+		err := pgrollback.ExecuteWithLock(session, query)
 		// Pode falhar se a tabela não existir, mas não deve falhar por lock
 		if err != nil && !contains(err.Error(), "does not exist") && !contains(err.Error(), "relation") {
 			t.Logf("ExecuteWithLock(INSERT) error = %v (may be expected if table doesn't exist)", err)
@@ -553,7 +553,7 @@ func TestExecuteWithLock(t *testing.T) {
 
 	t.Run("execute_update_with_lock", func(t *testing.T) {
 		query := "UPDATE test_table SET id = 2 WHERE id = 1"
-		err := pgtest.ExecuteWithLock(session, query)
+		err := pgrollback.ExecuteWithLock(session, query)
 		// Pode falhar se a tabela não existir, mas não deve falhar por lock
 		if err != nil && !contains(err.Error(), "does not exist") && !contains(err.Error(), "relation") {
 			t.Logf("ExecuteWithLock(UPDATE) error = %v (may be expected if table doesn't exist)", err)

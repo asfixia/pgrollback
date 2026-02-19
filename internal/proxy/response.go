@@ -71,7 +71,7 @@ func resolveFieldDescriptions(query string, rows pgx.Rows) (fields []pgproto3.Fi
 // sintético do Describe para que clientes (ex.: PHP PDO) que dependem da consistência recebam a linha.
 func (p *proxyConnection) SendSelectResultsWithQuery(rows pgx.Rows, query string) error {
 	fields, returnOIDs, returnsSet := resolveFieldDescriptions(query, rows)
-	if os.Getenv("PGTEST_LOG_MESSAGE_ORDER") == "1" {
+	if os.Getenv("PGROLLBACK_LOG_MESSAGE_ORDER") == "1" {
 		log.Printf("[MSG_ORDER] SEND RowDescription: %d cols", len(fields))
 	}
 	p.backend.Send(&pgproto3.RowDescription{Fields: fields})
@@ -101,7 +101,7 @@ func (p *proxyConnection) SendSelectResultsWithQuery(rows pgx.Rows, query string
 		}
 		log.Printf("[PROXY] INSERT/UPDATE/DELETE RETURNING returned 0 rows (cols=%d); client may get empty result; query: %s", len(fields), preview)
 	}
-	if os.Getenv("PGTEST_LOG_MESSAGE_ORDER") == "1" {
+	if os.Getenv("PGROLLBACK_LOG_MESSAGE_ORDER") == "1" {
 		log.Printf("[MSG_ORDER] SEND DataRows: %d", rowCount)
 		log.Printf("[MSG_ORDER] SEND CommandComplete: SELECT %d", rowCount)
 	}

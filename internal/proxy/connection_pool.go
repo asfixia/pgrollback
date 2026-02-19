@@ -66,7 +66,7 @@ func newConnectionForTestID(host string, port int, database string, user string,
 
 func getAppNameForTestID(testID string) string {
 	if testID == "default" {
-		return "pgtest_default"
+		return "pgrollback_default"
 	}
-	return fmt.Sprintf("pgtest-%s", testID)
+	return fmt.Sprintf("pgrollback-%s", testID)
 }

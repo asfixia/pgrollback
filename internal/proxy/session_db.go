@@ -20,7 +20,7 @@ import (
 type ConnectionID = uintptr
 
 // ErrOnlyOneTransactionAtATime is returned when a second connection tries to BEGIN while another already has an open user transaction on the same session.
-var ErrOnlyOneTransactionAtATime = errors.New("only one transaction could start a transaction at a time on our pgtest")
+var ErrOnlyOneTransactionAtATime = errors.New("only one transaction could start a transaction at a time on our pgrollback")
 
 // realSessionDB encapsulates the PostgreSQL connection and its active transaction.
 // - The connection (conn) is only used for transaction control: Begin, Rollback base, Close, keepalive, advisory lock.
@@ -53,7 +53,7 @@ func (d *realSessionDB) GetSavepointLevel() int {
 
 // GetSavepointName returns the name for the current savepoint level. Caller must hold d.mu when level may be changing.
 func (d *realSessionDB) GetSavepointName() string {
-	return fmt.Sprintf("pgtest_v_%d", d.SavepointLevel)
+	return fmt.Sprintf("pgrollback_v_%d", d.SavepointLevel)
 }
 
 // GetNextSavepointName returns the name for the next SAVEPOINT (current level + 1) without incrementing.
@@ -61,7 +61,7 @@ func (d *realSessionDB) GetSavepointName() string {
 func (d *realSessionDB) GetNextSavepointName() string {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	return fmt.Sprintf("pgtest_v_%d", d.SavepointLevel+1)
+	return fmt.Sprintf("pgrollback_v_%d", d.SavepointLevel+1)
 }
 
 // IncrementSavepointLevel increments the savepoint level. Call only after a SAVEPOINT has been successfully executed.
@@ -87,12 +87,12 @@ func (d *realSessionDB) decrementSavepointLevelLocked() {
 
 // getSavepointNameLocked returns the name for the current savepoint level. Caller must hold d.mu.
 func (d *realSessionDB) getSavepointNameLocked() string {
-	return fmt.Sprintf("pgtest_v_%d", d.SavepointLevel)
+	return fmt.Sprintf("pgrollback_v_%d", d.SavepointLevel)
 }
 
 // getNextSavepointNameLocked returns the name for the next SAVEPOINT (current level + 1) without incrementing. Caller must hold d.mu.
 func (d *realSessionDB) getNextSavepointNameLocked() string {
-	return fmt.Sprintf("pgtest_v_%d", d.SavepointLevel+1)
+	return fmt.Sprintf("pgrollback_v_%d", d.SavepointLevel+1)
 }
 
 // incrementSavepointLevelLocked increments the savepoint level. Caller must hold d.mu.
@@ -132,23 +132,23 @@ func (d *realSessionDB) isTransactionHeldByOtherConnection(connID ConnectionID) 
 	return d.hasOpenUserTransaction() && d.connectionWithOpenTx != connID
 }
 
-// IsUserBeginQuery returns true when the query is a user BEGIN (SAVEPOINT pgtest_v_*).
+// IsUserBeginQuery returns true when the query is a user BEGIN (SAVEPOINT pgrollback_v_*).
 // Callers use this to decide whether to call ClaimOpenTransaction (e.g. before executing TCL).
 func IsUserBeginQuery(query string) bool {
 	stmts, err := sqlpkg.ParseStatements(query)
 	if err != nil || len(stmts) == 0 || stmts[0].Stmt == nil {
 		return false
 	}
-	return sqlpkg.IsSavepoint(stmts[0].Stmt) && strings.HasPrefix(sqlpkg.GetSavepointName(stmts[0].Stmt), pgtestSavepointPrefix)
+	return sqlpkg.IsSavepoint(stmts[0].Stmt) && strings.HasPrefix(sqlpkg.GetSavepointName(stmts[0].Stmt), pgrollbackSavepointPrefix)
 }
 
-// isUserReleaseQuery returns true when the query is a user COMMIT (RELEASE SAVEPOINT pgtest_v_*).
+// isUserReleaseQuery returns true when the query is a user COMMIT (RELEASE SAVEPOINT pgrollback_v_*).
 func isUserReleaseQuery(query string) bool {
 	stmts, err := sqlpkg.ParseStatements(query)
 	if err != nil || len(stmts) == 0 || stmts[0].Stmt == nil {
 		return false
 	}
-	return sqlpkg.IsReleaseSavepoint(stmts[0].Stmt) && strings.HasPrefix(sqlpkg.GetSavepointName(stmts[0].Stmt), pgtestSavepointPrefix)
+	return sqlpkg.IsReleaseSavepoint(stmts[0].Stmt) && strings.HasPrefix(sqlpkg.GetSavepointName(stmts[0].Stmt), pgrollbackSavepointPrefix)
 }
 
 // IsQueryThatAffectsClaim returns true when the query is one that claimed (BEGIN) or that would release (COMMIT).
@@ -574,7 +574,7 @@ func (d *realSessionDB) RollbackUserSavepointsOnDisconnect(ctx context.Context, 
 			d.mu.Unlock()
 			break
 		}
-		name := fmt.Sprintf("pgtest_v_%d", d.SavepointLevel)
+		name := fmt.Sprintf("pgrollback_v_%d", d.SavepointLevel)
 		d.SavepointLevel--
 		d.mu.Unlock()
 
@@ -634,7 +634,7 @@ func (d *realSessionDB) rollbackTx(ctx context.Context) error {
 }
 
 // startNewTx runs ROLLBACK on the connection (to clear any failed state) and begins a new transaction.
-// Used by "pgtest rollback" to get a clean transaction.
+// Used by "pgrollback rollback" to get a clean transaction.
 func (d *realSessionDB) startNewTx(ctx context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()

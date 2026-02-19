@@ -14,7 +14,7 @@ type sessionProviderAdapter struct {
 }
 
 func (a *sessionProviderAdapter) GetSessions() []gui.SessionInfo {
-	sessions := a.s.Pgtest.GetAllSessions()
+	sessions := a.s.PgRollback.GetAllSessions()
 	list := make([]gui.SessionInfo, 0, len(sessions))
 	for testID, session := range sessions {
 		inTransaction := false
@@ -40,11 +40,11 @@ func (a *sessionProviderAdapter) GetSessions() []gui.SessionInfo {
 }
 
 func (a *sessionProviderAdapter) DestroySession(testID string) error {
-	return a.s.Pgtest.DestroySession(testID)
+	return a.s.PgRollback.DestroySession(testID)
 }
 
 func (a *sessionProviderAdapter) ClearHistory(testID string) error {
-	session := a.s.Pgtest.GetSession(testID)
+	session := a.s.PgRollback.GetSession(testID)
 	if session == nil {
 		return fmt.Errorf("session not found")
 	}
@@ -55,10 +55,10 @@ func (a *sessionProviderAdapter) ClearHistory(testID string) error {
 }
 
 func (a *sessionProviderAdapter) DestroyAllSessions() (int, error) {
-	sessions := a.s.Pgtest.GetAllSessions()
+	sessions := a.s.PgRollback.GetAllSessions()
 	n := 0
 	for testID := range sessions {
-		if err := a.s.Pgtest.DestroySession(testID); err != nil {
+		if err := a.s.PgRollback.DestroySession(testID); err != nil {
 			return n, err
 		}
 		n++

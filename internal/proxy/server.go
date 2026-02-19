@@ -34,17 +34,17 @@ const (
 )
 
 type Server struct {
-	Pgtest       *PGTest
-	listener     net.Listener
-	listenHost   string // actual bind host (set after Listen)
-	listenPort   int    // actual bind port (set after Listen; when 0 was requested, kernel assigns)
-	wg           sync.WaitGroup
-	startErr     error
-	mu           sync.RWMutex
+	PgRollback *PgRollback
+	listener   net.Listener
+	listenHost string // actual bind host (set after Listen)
+	listenPort int    // actual bind port (set after Listen; when 0 was requested, kernel assigns)
+	wg         sync.WaitGroup
+	startErr   error
+	mu         sync.RWMutex
 	// GUI on same port: connections that look like HTTP are pushed here and served by guiHTTP
-	guiCh        chan net.Conn
-	guiListener  *injectListener
-	guiHTTP      *http.Server
+	guiCh       chan net.Conn
+	guiListener *injectListener
+	guiHTTP     *http.Server
 }
 
 // ListenHost returns the host the server is bound to (e.g. "127.0.0.1").
@@ -83,9 +83,9 @@ func NewServer(postgresHost string, postgresPort int, postgresDB, postgresUser, 
 		listenHost = "localhost"
 	}
 
-	pgtest := NewPGTest(postgresHost, postgresPort, postgresDB, postgresUser, postgresPass, timeout, sessionTimeout, keepaliveInterval)
+	pgrollback := NewPgRollback(postgresHost, postgresPort, postgresDB, postgresUser, postgresPass, timeout, sessionTimeout, keepaliveInterval)
 	server := &Server{
-		Pgtest:     pgtest,
+		PgRollback: pgrollback,
 		listenHost: listenHost,
 		listenPort: listenPort,
 	}
@@ -144,7 +144,7 @@ func NewServer(postgresHost string, postgresPort int, postgresDB, postgresUser, 
 		return server
 	}
 
-	logIfVerbose("PGTest server listening on %s:%d", actualHost, actualPort)
+	logIfVerbose("PgRollback server listening on %s:%d", actualHost, actualPort)
 	return server
 }
 
@@ -163,18 +163,18 @@ func (s *Server) waitUntilListening(host string, port int) bool {
 //
 // IMPORTANTE: Comportamento de Conexão e Reutilização
 //
-// O pgtest é um servidor intermediário que fica entre o cliente e o PostgreSQL real.
-// Todas as conexões são feitas ao pgtest, não diretamente ao PostgreSQL.
+// O pgrollback é um servidor intermediário que fica entre o cliente e o PostgreSQL real.
+// Todas as conexões são feitas ao pgrollback, não diretamente ao PostgreSQL.
 //
 // Reutilização de Conexões PostgreSQL por application_name:
-// - Cada cliente se conecta ao pgtest usando application_name (via parâmetro de conexão)
+// - Cada cliente se conecta ao pgrollback usando application_name (via parâmetro de conexão)
 // - O application_name é extraído e convertido em testID (via protocol.ExtractTestID)
 // - O mesmo testID sempre reutiliza a mesma conexão física ao PostgreSQL real
 // - Isso é gerenciado por SessionsByTestID: cada sessão guarda sua DB (conn+tx) sob o testID
 //
 // Simulação de Autenticação para o Cliente:
-//   - Cada cliente sempre passa pelo handshake completo de autenticação com o pgtest
-//   - O pgtest simula a autenticação PostgreSQL (pede senha, responde AuthenticationOK)
+//   - Cada cliente sempre passa pelo handshake completo de autenticação com o pgrollback
+//   - O pgrollback simula a autenticação PostgreSQL (pede senha, responde AuthenticationOK)
 //   - O cliente nunca sabe se está usando uma conexão PostgreSQL nova ou reutilizada
 //   - Isso permite que aplicações como PHP (que abrem e fecham conexões rapidamente)
 //     continuem usando a mesma transação PostgreSQL, mantendo as alterações
@@ -182,7 +182,7 @@ func (s *Server) waitUntilListening(host string, port int) bool {
 // Benefícios:
 // - Transações não são perdidas quando o cliente fecha a conexão (PHP, scripts, etc.)
 // - Alterações persistem entre reconexões do mesmo application_name
-// - Controle total sobre quando fazer rollback (via comandos pgtest especiais)
+// - Controle total sobre quando fazer rollback (via comandos pgrollback especiais)
 // - Isolamento entre diferentes testIDs (cada um tem sua própria transação)
 func (s *Server) acceptConnections() {
 	for {
@@ -271,7 +271,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 	defer s.wg.Done()
 	defer clientConn.Close()
 
-	// Log para rastrear conexões TCP ao pgtest
+	// Log para rastrear conexões TCP ao pgrollback
 	remoteAddr := clientConn.RemoteAddr().String()
 	// Adiciona stack trace para identificar qual código está causando a conexão
 	logIfVerbose("[SERVER] Nova conexão TCP recebida de %s", remoteAddr)
@@ -398,7 +398,7 @@ func (s *Server) processConnectionStartupMessage(backend *pgproto3.Backend, clie
 	// - Se já existe: reutiliza conexão PostgreSQL e transação existentes
 	// - Se não existe: cria nova conexão PostgreSQL e nova transação
 	// A conexão PostgreSQL é persistente e reutilizada para o mesmo testID
-	_, err = s.Pgtest.GetOrCreateSession(testID)
+	_, err = s.PgRollback.GetOrCreateSession(testID)
 	if err != nil {
 		errorBackend := pgproto3.NewBackend(clientConn, clientConn)
 		sendErrorToClient(errorBackend, err.Error())

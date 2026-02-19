@@ -19,8 +19,8 @@ func ExtractTestID(params map[string]string) (string, error) {
 		return "default", nil
 	}
 
-	// Verifica se está no formato pgtest_<test_id>
-	match := regexp.MustCompile(`^pgtest_(.+)$`).FindStringSubmatch(appName)
+	// Verifica se está no formato pgrollback_<test_id>
+	match := regexp.MustCompile(`^pgrollback_(.+)$`).FindStringSubmatch(appName)
 	if match != nil {
 		return match[1], nil
 	}
@@ -30,7 +30,7 @@ func ExtractTestID(params map[string]string) (string, error) {
 	}
 
 	// Qualquer outro application_name (como "pgAdmin", "psql", etc.) usa conexão compartilhada
-	// O application_name será definido como "pgtest_default" ao conectar ao PostgreSQL real
+	// O application_name será definido como "pgrollback_default" ao conectar ao PostgreSQL real
 	return "default", nil
 }
 
@@ -39,14 +39,14 @@ func BuildStartupMessageForPostgres(params map[string]string) map[string]string 
 
 	for k, v := range params {
 		if k == "application_name" {
-			newParams[k] = "pgtest-proxy"
+			newParams[k] = "pgrollback-proxy"
 		} else {
 			newParams[k] = v
 		}
 	}
 
 	if newParams["application_name"] == "" {
-		newParams["application_name"] = "pgtest-proxy"
+		newParams["application_name"] = "pgrollback-proxy"
 	}
 
 	return newParams

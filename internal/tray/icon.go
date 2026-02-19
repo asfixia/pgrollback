@@ -29,9 +29,6 @@ func generateIconBase64() []byte {
 	return data
 }
 
-// generateIcon returns Windows .ico data (works with systray.SetIcon) built at runtime.
-// The design is a blue circular background (PostgreSQL-style) with white \"PT\" letters
-// suggesting \"PGTest\" and a subtle cylinder hint.
 func generateIcon() []byte {
 	const size = 32
 	img := image.NewRGBA(image.Rect(0, 0, size, size))

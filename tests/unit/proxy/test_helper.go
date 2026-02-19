@@ -30,7 +30,7 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "proxy test: failed to load config: %v\n", err)
 		os.Exit(1)
 	}
-	useExternal := os.Getenv("PGTEST_USE_EXTERNAL_SERVER") == "1" || os.Getenv("PGTEST_USE_EXTERNAL_SERVER") == "true"
+	useExternal := os.Getenv("PGROLLBACK_USE_EXTERNAL_SERVER") == "1" || os.Getenv("PGROLLBACK_USE_EXTERNAL_SERVER") == "true"
 	if useExternal {
 		code := m.Run()
 		os.Exit(code)
@@ -91,7 +91,7 @@ func connectToRunningProxyWithAppName(t *testing.T, applicationName string) *sql
 		return nil
 	}
 	if proxyTestServer == nil {
-		t.Fatalf("No shared proxy server (PGTEST_USE_EXTERNAL_SERVER mode must use openDBToProxy with explicit host/port)")
+		t.Fatalf("No shared proxy server (PGROLLBACK_USE_EXTERNAL_SERVER mode must use openDBToProxy with explicit host/port)")
 		return nil
 	}
 	dsn := buildDSN(proxyTestServer.ListenHost(), proxyTestServer.ListenPort(), cfg.Postgres.Database, cfg.Postgres.User, cfg.Postgres.Password, applicationName)
@@ -103,10 +103,10 @@ func connectToRunningProxyWithAppName(t *testing.T, applicationName string) *sql
 	return db
 }
 
-// connectToRunningProxy connects to the shared proxy server with application_name = "pgtest_"+testID.
+// connectToRunningProxy connects to the shared proxy server with application_name = "pgrollback_"+testID.
 // Use this for tests that run against the server started in TestMain (like integration tests).
 func connectToRunningProxy(t *testing.T, testID string) *sql.DB {
-	return connectToRunningProxyWithAppName(t, "pgtest_"+testID)
+	return connectToRunningProxyWithAppName(t, "pgrollback_"+testID)
 }
 
 // proxyHostPort returns the host and port of the shared proxy server, or from cfg when using PGPTEST_USE_EXTERNAL_SERVER.
@@ -137,7 +137,7 @@ func openDBToProxy(t *testing.T, host string, port int, cfg *config.Config, appl
 	return db
 }
 
-// connectToProxyForTest starts a dedicated proxy for the test, connects with application_name = "pgtest_"+testID,
+// connectToProxyForTest starts a dedicated proxy for the test, connects with application_name = "pgrollback_"+testID,
 // and returns (db, ctx, cleanup). Cleanup closes the client first then stops the server to avoid shutdown deadlock.
 func connectToProxyForTest(t *testing.T, testID string) (*sql.DB, context.Context, func()) {
 	t.Helper()
@@ -165,7 +165,7 @@ func connectToProxyForTest(t *testing.T, testID string) (*sql.DB, context.Contex
 	if err := proxyServer.StartError(); err != nil {
 		t.Fatalf("Failed to start proxy server: %v", err)
 	}
-	db := openDBToProxy(t, proxyServer.ListenHost(), proxyServer.ListenPort(), cfg, "pgtest_"+testID)
+	db := openDBToProxy(t, proxyServer.ListenHost(), proxyServer.ListenPort(), cfg, "pgrollback_"+testID)
 	if db == nil {
 		return nil, nil, func() {}
 	}
@@ -245,7 +245,7 @@ func connectToProxyForTestWithServer(t *testing.T, testID string) (*sql.DB, cont
 	if err := proxyServer.StartError(); err != nil {
 		t.Fatalf("Failed to start proxy server: %v", err)
 	}
-	db := openDBToProxy(t, proxyServer.ListenHost(), proxyServer.ListenPort(), cfg, "pgtest_"+testID)
+	db := openDBToProxy(t, proxyServer.ListenHost(), proxyServer.ListenPort(), cfg, "pgrollback_"+testID)
 	if db == nil {
 		return nil, nil, nil, func() {}
 	}
@@ -298,16 +298,16 @@ func connectToProxyForTestWithAppNameAndServer(t *testing.T, applicationName str
 	return db, ctx, proxyServer, cleanup
 }
 
-func newPGTestFromConfig() *proxy.PGTest {
-	return proxy.NewPGTestFromConfigForTesting()
+func newPgRollbackFromConfig() *proxy.PgRollback {
+	return proxy.NewPgRollbackFromConfigForTesting()
 }
 
-func newTestSession(pgtest *proxy.PGTest) *proxy.TestSession {
-	return proxy.NewTestSessionForTesting(pgtest)
+func newTestSession(pgrollback *proxy.PgRollback) *proxy.TestSession {
+	return proxy.NewTestSessionForTesting(pgrollback)
 }
 
-func newTestSessionWithLevel(pgtest *proxy.PGTest, testID string) *proxy.TestSession {
-	return proxy.NewTestSessionWithLevel(pgtest, testID)
+func newTestSessionWithLevel(pgrollback *proxy.PgRollback, testID string) *proxy.TestSession {
+	return proxy.NewTestSessionWithLevel(pgrollback, testID)
 }
 
 func contains(s, substr string) bool {

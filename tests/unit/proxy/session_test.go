@@ -11,24 +11,24 @@ import (
 )
 
 func TestGetOrCreateSession(t *testing.T) {
-	pgtest := newPGTestFromConfig()
+	pgrollback := newPgRollbackFromConfig()
 
 	t.Run("create_new_session", func(t *testing.T) {
 		testID := "test123"
-		session, err := pgtest.GetOrCreateSession(testID)
+		session, err := pgrollback.GetOrCreateSession(testID)
 		if err != nil {
-			t.Errorf("Session.TestID = %v, want %v due to error: %v", pgtest.GetTestID(session), testID, err)
+			t.Errorf("Session.TestID = %v, want %v due to error: %v", pgrollback.GetTestID(session), testID, err)
 		}
 	})
 
 	t.Run("reuse_existing_session", func(t *testing.T) {
 		testID := "test456"
-		session1, err1 := pgtest.GetOrCreateSession(testID)
+		session1, err1 := pgrollback.GetOrCreateSession(testID)
 		if err1 != nil {
 			t.Fatalf("GetOrCreateSession() error = %v", err1)
 		}
 
-		session2, err2 := pgtest.GetOrCreateSession(testID)
+		session2, err2 := pgrollback.GetOrCreateSession(testID)
 		if err2 != nil {
 			t.Fatalf("GetOrCreateSession() error = %v", err2)
 		}
@@ -40,10 +40,10 @@ func TestGetOrCreateSession(t *testing.T) {
 }
 
 func TestGetSession(t *testing.T) {
-	pgtest := newPGTestFromConfig()
+	pgrollback := newPgRollbackFromConfig()
 
 	t.Run("get_non_existent_session", func(t *testing.T) {
-		session := pgtest.GetSession("nonexistent")
+		session := pgrollback.GetSession("nonexistent")
 		if session != nil {
 			t.Error("GetSession() should return nil for non-existent session")
 		}
@@ -51,7 +51,7 @@ func TestGetSession(t *testing.T) {
 }
 
 func TestConcurrency(t *testing.T) {
-	pgtest := newPGTestFromConfig()
+	pgrollback := newPgRollbackFromConfig()
 	testID := "concurrent_test"
 
 	var wg sync.WaitGroup
@@ -61,7 +61,7 @@ func TestConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := pgtest.GetOrCreateSession(testID)
+			_, err := pgrollback.GetOrCreateSession(testID)
 			if err != nil {
 				errors <- err
 			}
@@ -79,10 +79,10 @@ func TestConcurrency(t *testing.T) {
 }
 
 func TestGetAllSessions(t *testing.T) {
-	pgtest := newPGTestFromConfig()
+	pgrollback := newPgRollbackFromConfig()
 
 	t.Run("empty_sessions", func(t *testing.T) {
-		sessions := pgtest.GetAllSessions()
+		sessions := pgrollback.GetAllSessions()
 		if sessions == nil {
 			t.Error("GetAllSessions() should not return nil")
 		}
@@ -95,17 +95,17 @@ func TestGetAllSessions(t *testing.T) {
 		testID1 := "test_getall_1"
 		testID2 := "test_getall_2"
 
-		session1, err1 := pgtest.GetOrCreateSession(testID1)
+		session1, err1 := pgrollback.GetOrCreateSession(testID1)
 		if err1 != nil {
 			t.Fatalf("1 - multiple_sessions GetOrCreateSession() error = %v", err1)
 		}
 
-		session2, err2 := pgtest.GetOrCreateSession(testID2)
+		session2, err2 := pgrollback.GetOrCreateSession(testID2)
 		if err2 != nil {
 			t.Fatalf("2 - multiple_sessions GetOrCreateSession() error = %v", err2)
 		}
 
-		sessions := pgtest.GetAllSessions()
+		sessions := pgrollback.GetAllSessions()
 		if len(sessions) < 2 {
 			t.Errorf("GetAllSessions() = %d sessions, want at least 2", len(sessions))
 		}
@@ -121,10 +121,10 @@ func TestGetAllSessions(t *testing.T) {
 }
 
 func TestDestroySession(t *testing.T) {
-	pgtest := newPGTestFromConfig()
+	pgrollback := newPgRollbackFromConfig()
 
 	t.Run("destroy_non_existent_session", func(t *testing.T) {
-		err := pgtest.DestroySession("nonexistent_session")
+		err := pgrollback.DestroySession("nonexistent_session")
 		if err == nil {
 			t.Error("DestroySession() should return error for non-existent session")
 		}
@@ -135,7 +135,7 @@ func TestDestroySession(t *testing.T) {
 
 	t.Run("destroy_existing_session", func(t *testing.T) {
 		testID := "test_destroy_session"
-		session, err := pgtest.GetOrCreateSession(testID)
+		session, err := pgrollback.GetOrCreateSession(testID)
 		if err != nil {
 			t.Fatalf("GetOrCreateSession() error = %v", err)
 		}
@@ -145,18 +145,18 @@ func TestDestroySession(t *testing.T) {
 		}
 
 		// Verifica que a sessão existe antes de destruir
-		if pgtest.GetSession(testID) == nil {
+		if pgrollback.GetSession(testID) == nil {
 			t.Fatal("Session should exist before destroy")
 		}
 
 		// Destrói a sessão (faz rollback, fecha conexão e remove do mapa)
-		err = pgtest.DestroySession(testID)
+		err = pgrollback.DestroySession(testID)
 		if err != nil {
 			t.Fatalf("DestroySession() error = %v", err)
 		}
 
 		// Verifica que a sessão foi removida
-		if pgtest.GetSession(testID) != nil {
+		if pgrollback.GetSession(testID) != nil {
 			t.Error("Session should be removed after destroy")
 		}
 	})
@@ -166,7 +166,7 @@ func TestCleanupExpiredSessions(t *testing.T) {
 	// Para este teste específico, precisamos de um timeout curto
 	// Carrega config e usa timeout curto para o teste
 	cfg, err := config.LoadConfig(GetConfigPath())
-	var pgtest *proxy.PGTest
+	var pgrollback *proxy.PgRollback
 	if err != nil {
 		t.Fatalf("Failed to load config: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestCleanupExpiredSessions(t *testing.T) {
 	if sessionTimeout <= 0 {
 		sessionTimeout = 24 * time.Hour
 	}
-	pgtest = proxy.NewPGTest(
+	pgrollback = proxy.NewPgRollback(
 		cfg.Postgres.Host,
 		cfg.Postgres.Port,
 		cfg.Postgres.Database,
@@ -187,7 +187,7 @@ func TestCleanupExpiredSessions(t *testing.T) {
 
 	// Cria uma sessão que vai expirar usando GetOrCreateSession primeiro
 	testID := "expired_session_test"
-	session, err := pgtest.GetOrCreateSession(testID)
+	session, err := pgrollback.GetOrCreateSession(testID)
 	if err != nil {
 		t.Fatalf("GetOrCreateSession() error = %v", err)
 	}
@@ -199,12 +199,12 @@ func TestCleanupExpiredSessions(t *testing.T) {
 
 	time.Sleep(150 * time.Millisecond)
 
-	cleaned := pgtest.CleanupExpiredSessions()
+	cleaned := pgrollback.CleanupExpiredSessions()
 	if cleaned != 1 {
 		t.Errorf("CleanupExpiredSessions() = %v, want 1", cleaned)
 	}
 
-	if pgtest.GetSession(testID) != nil {
+	if pgrollback.GetSession(testID) != nil {
 		t.Error("Expired session should be removed")
 	}
 }
@@ -218,7 +218,7 @@ func TestSessionTimeout(t *testing.T) {
 	if sessionTimeout <= 0 {
 		sessionTimeout = 24 * time.Hour
 	}
-	pgtest := proxy.NewPGTest(
+	pgrollback := proxy.NewPgRollback(
 		cfg.Postgres.Host,
 		cfg.Postgres.Port,
 		cfg.Postgres.Database,
@@ -230,26 +230,26 @@ func TestSessionTimeout(t *testing.T) {
 	)
 
 	testID := "timeout_test_session"
-	_, err = pgtest.GetOrCreateSession(testID)
+	_, err = pgrollback.GetOrCreateSession(testID)
 	if err != nil {
 		t.Fatalf("GetOrCreateSession() error = %v", err)
 	}
 
 	// Verifica que a sessão existe
-	if pgtest.GetSession(testID) == nil {
+	if pgrollback.GetSession(testID) == nil {
 		t.Fatal("Session should exist initially")
 	}
 
 	// Espera menos que o timeout - sessão ainda deve existir
 	time.Sleep(20 * time.Millisecond)
-	if pgtest.GetSession(testID) == nil {
+	if pgrollback.GetSession(testID) == nil {
 		t.Error("Session should still exist before timeout")
 	}
 
 	// Espera mais que o timeout - sessão deve expirar
 	time.Sleep(20 * time.Millisecond)
 
-	cleaned := pgtest.CleanupExpiredSessions()
+	cleaned := pgrollback.CleanupExpiredSessions()
 	if cleaned == 0 {
 		t.Log("Session may not have expired yet, but cleanup should work")
 	} else {

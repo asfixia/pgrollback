@@ -13,13 +13,13 @@ func logIfVerbose(format string, args ...interface{}) {
 	testutil.LogIfVerbose(format, args...)
 }
 
-// newPGTestFromConfig cria uma instância PGTest a partir da configuração
+// newPgRollbackFromConfig cria uma instância PGROLLBACK a partir da configuração
 // Tenta carregar de:
-// 1. Variável de ambiente PGTEST_CONFIG (se definida)
+// 1. Variável de ambiente PGROLLBACK_CONFIG (se definida)
 // 2. config/pgrollback.yaml (relativo ao diretório de trabalho)
 // 3. Busca automática (pasta do executável ou config/)
 // Se não conseguir carregar a configuração, usa valores padrão
-func newPGTestFromConfig() *PGTest {
+func newPgRollbackFromConfig() *PgRollback {
 	var cfg *config.Config
 	var err error
 	configPath := testutil.ConfigPath()
@@ -38,7 +38,7 @@ func newPGTestFromConfig() *PGTest {
 	if err != nil {
 		logIfVerbose("Warning: Failed to load config: %v, using defaults", err)
 		// Fallback para valores padrão se não conseguir carregar config
-		return NewPGTest("localhost", 5432, "postgres", "postgres", "", 3600*time.Second, 24*time.Hour, 0)
+		return NewPgRollback("localhost", 5432, "postgres", "postgres", "", 3600*time.Second, 24*time.Hour, 0)
 	}
 
 	configPathDisplay := "auto"
@@ -52,7 +52,7 @@ func newPGTestFromConfig() *PGTest {
 	if cfg.Proxy.KeepaliveInterval.Duration > 0 {
 		keepaliveInterval = cfg.Proxy.KeepaliveInterval.Duration
 	}
-	return NewPGTest(
+	return NewPgRollback(
 		cfg.Postgres.Host,
 		cfg.Postgres.Port,
 		cfg.Postgres.Database,

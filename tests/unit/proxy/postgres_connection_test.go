@@ -23,7 +23,7 @@ const (
 // usando a biblioteca padrão database/sql com driver pgx
 // Este teste verifica se o PostgreSQL está acessível e se a biblioteca funciona corretamente
 func TestPostgreSQLConnection(t *testing.T) {
-	// Carrega configuração do pgtest.yaml
+	// Carrega configuração do pgrollback.yaml
 	configPath := GetConfigPath()
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
@@ -31,7 +31,7 @@ func TestPostgreSQLConnection(t *testing.T) {
 		return
 	}
 
-	// Constrói DSN usando configurações do pgtest.yaml
+	// Constrói DSN usando configurações do pgrollback.yaml
 	dsn := buildDSN(
 		cfg.Postgres.Host,
 		cfg.Postgres.Port,
@@ -60,7 +60,7 @@ func TestPostgreSQLConnection(t *testing.T) {
 		t.Fatalf("Failed to ping PostgreSQL database: %v\n"+
 			"This test verifies that:\n"+
 			"1. PostgreSQL is running and accessible\n"+
-			"2. The connection parameters in pgtest.yaml are correct\n"+
+			"2. The connection parameters in pgrollback.yaml are correct\n"+
 			"3. The pgx library can connect to PostgreSQL\n"+
 			"\nConfig used:\n"+
 			"  Host: %s\n"+
@@ -95,7 +95,7 @@ func TestPostgreSQLConnection(t *testing.T) {
 }
 
 // TestPostgreSQLConnectionWithApplicationName testa conexão com application_name específico
-// Isso verifica se o pgtest pode usar application_name ao conectar ao PostgreSQL
+// Isso verifica se o pgrollback pode usar application_name ao conectar ao PostgreSQL
 func TestPostgreSQLConnectionWithApplicationName(t *testing.T) {
 	configPath := GetConfigPath()
 	cfg, err := config.LoadConfig(configPath)
@@ -111,7 +111,7 @@ func TestPostgreSQLConnectionWithApplicationName(t *testing.T) {
 		cfg.Postgres.Database,
 		cfg.Postgres.User,
 		cfg.Postgres.Password,
-		"pgtest_connection_test", // application_name
+		"pgrollback_connection_test", // application_name
 	)
 
 	db, err := sql.Open("pgx", dsn)
@@ -137,8 +137,8 @@ func TestPostgreSQLConnectionWithApplicationName(t *testing.T) {
 		t.Fatalf("Failed to get application_name: %v", err)
 	}
 
-	if appName != "pgtest_connection_test" {
-		t.Errorf("Expected application_name to be 'pgtest_connection_test', got '%s'", appName)
+	if appName != "pgrollback_connection_test" {
+		t.Errorf("Expected application_name to be 'pgrollback_connection_test', got '%s'", appName)
 	}
 
 	t.Logf("Successfully connected with application_name: %s", appName)
@@ -146,7 +146,7 @@ func TestPostgreSQLConnectionWithApplicationName(t *testing.T) {
 
 // TestBackendStartupCacheFromPostgreSQL verifies that when we connect to the real PostgreSQL
 // (via GetOrCreateSession), the backend startup cache is filled with ParameterStatus messages
-// from the server so pgtest can replay them to clients instead of hardcoded values.
+// from the server so pgrollback can replay them to clients instead of hardcoded values.
 func TestBackendStartupCacheFromPostgreSQL(t *testing.T) {
 	configPath := GetConfigPath()
 	cfg, err := config.LoadConfig(configPath)
@@ -155,7 +155,7 @@ func TestBackendStartupCacheFromPostgreSQL(t *testing.T) {
 		return
 	}
 
-	pgtest := proxy.NewPGTest(
+	pgrollback := proxy.NewPgRollback(
 		cfg.Postgres.Host,
 		cfg.Postgres.Port,
 		cfg.Postgres.Database,
@@ -167,20 +167,20 @@ func TestBackendStartupCacheFromPostgreSQL(t *testing.T) {
 	)
 
 	// Before any session, cache should be nil
-	if c := pgtest.GetBackendStartupCache(); c != nil {
+	if c := pgrollback.GetBackendStartupCache(); c != nil {
 		t.Logf("Cache already set before first session (possible from another test); continuing")
 	}
 
 	// Connect to real PostgreSQL (creates session and fills cache)
-	testID := "pgtest_backend_startup_cache_test"
-	_, err = pgtest.GetOrCreateSession(testID)
+	testID := "pgrollback_backend_startup_cache_test"
+	_, err = pgrollback.GetOrCreateSession(testID)
 	if err != nil {
 		t.Skipf("Skipping test - PostgreSQL not available: %v", err)
 		return
 	}
-	defer func() { _ = pgtest.DestroySession(testID) }()
+	defer func() { _ = pgrollback.DestroySession(testID) }()
 
-	cache := pgtest.GetBackendStartupCache()
+	cache := pgrollback.GetBackendStartupCache()
 	if cache == nil {
 		t.Fatal("GetBackendStartupCache() should be non-nil after first connection to PostgreSQL")
 	}
@@ -255,7 +255,7 @@ func TestPostgreSQLConnectionLifecycle(t *testing.T) {
 		return
 	}
 
-	pgtest := proxy.NewPGTest(
+	pgrollback := proxy.NewPgRollback(
 		cfg.Postgres.Host,
 		cfg.Postgres.Port,
 		cfg.Postgres.Database,
@@ -269,10 +269,10 @@ func TestPostgreSQLConnectionLifecycle(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	testID1 := "pgtest_lifecycle_client1"
+	testID1 := "pgrollback_lifecycle_client1"
 
 	// --- Phase 1: First connection ---
-	session1, err := pgtest.GetOrCreateSession(testID1)
+	session1, err := pgrollback.GetOrCreateSession(testID1)
 	if err != nil {
 		t.Skipf("Skipping test - PostgreSQL not available: %v", err)
 		return
@@ -289,27 +289,27 @@ func TestPostgreSQLConnectionLifecycle(t *testing.T) {
 	if one != 1 {
 		t.Errorf("Phase 1 SELECT 1: got %d, want 1", one)
 	}
-	wantAppName := "pgtest-" + testID1
+	wantAppName := "pgrollback-" + testID1
 	if appName != wantAppName {
 		t.Errorf("Phase 1 application_name: got %q, want %q", appName, wantAppName)
 	}
 	t.Logf("Phase 1 OK: SELECT 1=%d, application_name=%s", one, appName)
 
-	cache := pgtest.GetBackendStartupCache()
+	cache := pgrollback.GetBackendStartupCache()
 	if cache == nil || len(cache.ParameterStatuses) == 0 {
 		t.Fatal("Phase 1: backend startup cache should be filled after first connection")
 	}
 	t.Logf("Phase 1: backend cache has %d parameter statuses", len(cache.ParameterStatuses))
 
 	// --- Phase 2: Disconnect and reconnect ---
-	if err := pgtest.DestroySession(testID1); err != nil {
+	if err := pgrollback.DestroySession(testID1); err != nil {
 		t.Fatalf("DestroySession: %v", err)
 	}
-	if pgtest.GetSession(testID1) != nil {
+	if pgrollback.GetSession(testID1) != nil {
 		t.Fatal("Session should be nil after DestroySession")
 	}
 
-	session2, err := pgtest.GetOrCreateSession(testID1)
+	session2, err := pgrollback.GetOrCreateSession(testID1)
 	if err != nil {
 		t.Fatalf("Reconnect GetOrCreateSession: %v", err)
 	}
@@ -330,11 +330,11 @@ func TestPostgreSQLConnectionLifecycle(t *testing.T) {
 	}
 	t.Logf("Phase 2 OK: disconnect/reconnect, SELECT 1=%d, application_name=%s", one2, appName2)
 
-	defer func() { _ = pgtest.DestroySession(testID1) }()
+	defer func() { _ = pgrollback.DestroySession(testID1) }()
 
 	// --- Phase 3: Two clients simultaneously ---
-	testIDA := "pgtest_lifecycle_clientA"
-	testIDB := "pgtest_lifecycle_clientB"
+	testIDA := "pgrollback_lifecycle_clientA"
+	testIDB := "pgrollback_lifecycle_clientB"
 
 	type result struct {
 		one     int
@@ -346,7 +346,7 @@ func TestPostgreSQLConnectionLifecycle(t *testing.T) {
 	doneB := make(chan result, 1)
 
 	go func() {
-		sess, err := pgtest.GetOrCreateSession(testIDA)
+		sess, err := pgrollback.GetOrCreateSession(testIDA)
 		if err != nil {
 			doneA <- result{err: err}
 			return
@@ -355,7 +355,7 @@ func TestPostgreSQLConnectionLifecycle(t *testing.T) {
 		doneA <- result{one: one, appName: app, err: err}
 	}()
 	go func() {
-		sess, err := pgtest.GetOrCreateSession(testIDB)
+		sess, err := pgrollback.GetOrCreateSession(testIDB)
 		if err != nil {
 			doneB <- result{err: err}
 			return
@@ -376,7 +376,7 @@ func TestPostgreSQLConnectionLifecycle(t *testing.T) {
 	if resA.one != 1 || resB.one != 1 {
 		t.Errorf("Phase 3 SELECT 1: A=%d, B=%d; want both 1", resA.one, resB.one)
 	}
-	wantAppA, wantAppB := "pgtest-"+testIDA, "pgtest-"+testIDB
+	wantAppA, wantAppB := "pgrollback-"+testIDA, "pgrollback-"+testIDB
 	if resA.appName != wantAppA {
 		t.Errorf("Phase 3 client A application_name: got %q, want %q", resA.appName, wantAppA)
 	}
@@ -387,6 +387,6 @@ func TestPostgreSQLConnectionLifecycle(t *testing.T) {
 		resA.one, resA.appName, resB.one, resB.appName)
 
 	// Cleanup
-	_ = pgtest.DestroySession(testIDA)
-	_ = pgtest.DestroySession(testIDB)
+	_ = pgrollback.DestroySession(testIDA)
+	_ = pgrollback.DestroySession(testIDB)
 }

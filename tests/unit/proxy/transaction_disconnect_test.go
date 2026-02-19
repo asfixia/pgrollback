@@ -12,7 +12,7 @@ import (
 )
 
 // TestUserTransactionRolledBackOnDisconnect verifies that user-started transactions (BEGIN)
-// are rolled back when the client disconnects, while the base transaction used by pgtest
+// are rolled back when the client disconnects, while the base transaction used by pgrollback
 // remains active and unchanged.
 func TestUserTransactionRolledBackOnDisconnect(t *testing.T) {
 	testID := "test_tx_disconnect"
@@ -23,7 +23,7 @@ func TestUserTransactionRolledBackOnDisconnect(t *testing.T) {
 	db.SetConnMaxLifetime(5 * time.Second)
 	db.SetMaxOpenConns(1)
 
-	tableName := fmt.Sprintf("pgtest_tx_disconnect_%d", time.Now().UnixNano())
+	tableName := fmt.Sprintf("pgrollback_tx_disconnect_%d", time.Now().UnixNano())
 
 	// Create table and insert a row *outside* any user BEGIN so it lives in the base transaction.
 	testutil.CreateTableWithIdAndData(t, db, tableName)
@@ -46,7 +46,7 @@ func TestUserTransactionRolledBackOnDisconnect(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Fetch the server-side session corresponding to this testID.
-	session := proxyServer.Pgtest.GetSession(testID)
+	session := proxyServer.PgRollback.GetSession(testID)
 	if session == nil || session.DB == nil {
 		t.Fatalf("Session for testID %q should exist and have DB", testID)
 	}
@@ -83,7 +83,7 @@ func TestUserTransactionRolledBackOnDisconnect(t *testing.T) {
 }
 
 // TestOnlyOneConnectionMayHaveOpenTransaction verifies that when two connections
-// use the same pgtest session (same testID), only one can have an open user transaction
+// use the same pgrollback session (same testID), only one can have an open user transaction
 // (BEGIN) at a time; the second BEGIN returns ErrOnlyOneTransactionAtATime.
 func TestOnlyOneConnectionMayHaveOpenTransaction(t *testing.T) {
 	testID := "test_only_one_tx"
@@ -97,7 +97,7 @@ func TestOnlyOneConnectionMayHaveOpenTransaction(t *testing.T) {
 		return
 	}
 	// Second connection must hit the same proxy server as db1 (proxyServer), not the package shared server
-	db2 := openDBToProxy(t, proxyServer.ListenHost(), proxyServer.ListenPort(), cfg, "pgtest_"+testID)
+	db2 := openDBToProxy(t, proxyServer.ListenHost(), proxyServer.ListenPort(), cfg, "pgrollback_"+testID)
 	defer db2.Close()
 
 	// First connection: BEGIN must succeed.
@@ -113,7 +113,7 @@ func TestOnlyOneConnectionMayHaveOpenTransaction(t *testing.T) {
 	}
 
 	// Session should still have conn1 as the one with open tx; base transaction intact.
-	session := proxyServer.Pgtest.GetSession(testID)
+	session := proxyServer.PgRollback.GetSession(testID)
 	if session == nil || session.DB == nil {
 		t.Fatalf("session for testID %q should exist", testID)
 	}
@@ -139,7 +139,7 @@ func TestDisconnectWithoutCommitTableGone(t *testing.T) {
 	//db1.SetConnMaxLifetime(5 * time.Second)
 	//db1.SetMaxOpenConns(2)
 
-	tableName := fmt.Sprintf("pgtest_disconnect_table_%d", time.Now().UnixNano())
+	tableName := fmt.Sprintf("pgrollback_disconnect_table_%d", time.Now().UnixNano())
 
 	// Start a user transaction and create a table inside it.
 	if _, err := db1.ExecContext(ctx, "BEGIN"); err != nil {
@@ -163,7 +163,7 @@ func TestDisconnectWithoutCommitTableGone(t *testing.T) {
 	if cfg == nil {
 		return
 	}
-	db2 := openDBToProxy(t, proxyServer.ListenHost(), proxyServer.ListenPort(), cfg, "pgtest_"+testID)
+	db2 := openDBToProxy(t, proxyServer.ListenHost(), proxyServer.ListenPort(), cfg, "pgrollback_"+testID)
 	defer db2.Close()
 
 	var exists bool
@@ -179,7 +179,7 @@ func TestDisconnectWithoutCommitTableGone(t *testing.T) {
 	}
 
 	// Session and base transaction should still be valid.
-	session := proxyServer.Pgtest.GetSession(testID)
+	session := proxyServer.PgRollback.GetSession(testID)
 	if session == nil || session.DB == nil {
 		t.Fatalf("session for testID %q should exist after reconnect", testID)
 	}

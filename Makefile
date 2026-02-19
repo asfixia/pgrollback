@@ -1,7 +1,7 @@
 .PHONY: build test test-unit test-integration run clean
 
 build:
-	go build -o bin/pgrollback ./cmd/pgtest
+	go build -o bin/pgrollback ./cmd/pgrollback
 
 test: test-unit test-integration
 

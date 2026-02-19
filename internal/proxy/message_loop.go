@@ -217,7 +217,7 @@ func (p *proxyConnection) handleMessageCopyData(testID string) {
 
 func (p *proxyConnection) handleMessageClose(testID string, msg *pgproto3.Close) {
 	// Deallocate on backend using connection-prefixed name (only if we prepared it); clean up per-connection maps.
-	session := p.server.Pgtest.GetSession(testID)
+	session := p.server.PgRollback.GetSession(testID)
 	if session != nil && session.DB != nil {
 		pgConn := session.DB.PgConn()
 		if msg.ObjectType == 'S' && pgConn != nil && !p.IsMultiStatement(msg.Name) {
@@ -280,7 +280,7 @@ func (p *proxyConnection) handleMessageDescribe(msg *pgproto3.Describe) {
 func (p *proxyConnection) handleMessageExecute(testID string, msg *pgproto3.Execute) {
 	// Execute the prepared statement via PgConn.ExecPrepared() using per-connection
 	// portal/statement state and backend-prefixed statement name. LockRun serializes backend use.
-	session := p.server.Pgtest.GetSession(testID)
+	session := p.server.PgRollback.GetSession(testID)
 	if session == nil || session.DB == nil || session.DB.PgConn() == nil {
 		p.SendErrorResponse(fmt.Errorf("sessão não encontrada para testID: %s", testID))
 		return
@@ -347,12 +347,12 @@ func (p *proxyConnection) handleMessageParse(testID string, msg *pgproto3.Parse)
 	// Extended Query: intercept query, store per-connection, call PgConn.Prepare() with
 	// connection-prefixed name so concurrent connections don't collide. LockRun serializes
 	// use of the shared backend. Do NOT call any session.DB method that takes d.mu while holding LockRun.
-	session := p.server.Pgtest.GetSession(testID)
+	session := p.server.PgRollback.GetSession(testID)
 	if session == nil || session.DB == nil || session.DB.PgConn() == nil {
 		p.SendErrorResponse(fmt.Errorf("sessão não encontrada para testID: %s", testID))
 		return
 	}
-	interceptedQuery, err := p.server.Pgtest.InterceptQuery(testID, msg.Query, p.connectionID())
+	interceptedQuery, err := p.server.PgRollback.InterceptQuery(testID, msg.Query, p.connectionID())
 	if err != nil {
 		p.SendErrorResponse(err)
 		return
@@ -408,7 +408,7 @@ func (p *proxyConnection) handleMessageQuery(testID string, msg *pgproto3.Query)
 	queryStr := msg.String
 	remoteAddr := p.clientConn.RemoteAddr().String()
 	log.Printf("[PROXY] Query Simples Recebida (testID=%s, conn=%s): %s", testID, remoteAddr, queryStr)
-	if os.Getenv("PGTEST_LOG_MESSAGE_ORDER") == "1" {
+	if os.Getenv("PGROLLBACK_LOG_MESSAGE_ORDER") == "1" {
 		preview := queryStr
 		if len(preview) > 60 {
 			preview = strings.TrimSpace(preview[:60]) + "..."
@@ -431,11 +431,11 @@ func (p *proxyConnection) handleMessageQuery(testID string, msg *pgproto3.Query)
 // ProcessSimpleQuery lida com o fluxo de "Simple Query" (pgproto3.Query).
 // Intercepta o SQL, executa e garante o envio de ReadyForQuery ao final via executeQuery(..., true).
 func (p *proxyConnection) ProcessSimpleQuery(testID string, query string) error {
-	session := p.server.Pgtest.GetSession(testID)
+	session := p.server.PgRollback.GetSession(testID)
 	if session == nil {
 		return fmt.Errorf("sessão não encontrada para testID: %s", testID)
 	}
-	interceptedQuery, err := p.server.Pgtest.InterceptQuery(testID, query, p.connectionID())
+	interceptedQuery, err := p.server.PgRollback.InterceptQuery(testID, query, p.connectionID())
 	if err != nil {
 		return err
 	}
@@ -444,9 +444,9 @@ func (p *proxyConnection) ProcessSimpleQuery(testID string, query string) error 
 		session.DB.ClearLastQuery()
 	}
 	// Se a interceptação "engoliu" a query (retornou vazia ou marcador), apenas finalizamos.
-	// Isso acontece com comandos pgtest internos ou quando queremos silenciar uma query.
+	// Isso acontece com comandos pgrollback internos ou quando queremos silenciar uma query.
 	if interceptedQuery == "" || interceptedQuery == FULLROLLBACK_SENTINEL {
-		if os.Getenv("PGTEST_LOG_MESSAGE_ORDER") == "1" {
+		if os.Getenv("PGROLLBACK_LOG_MESSAGE_ORDER") == "1" {
 			log.Printf("[MSG_ORDER] SEND CommandComplete: SELECT (intercepted)")
 			log.Printf("[MSG_ORDER] SEND ReadyForQuery")
 		}
@@ -494,25 +494,3 @@ func bindParamsToArgs(params [][]byte, formatCodes []int16) []any {
 	}
 	return args
 }
-
-//// ProcessExtendedQuery lida com a fase de execução do fluxo estendido (pgproto3.Execute).
-//// Executa a query com os parâmetros bound; NÃO envia ReadyForQuery, pois o cliente enviará um Sync depois.
-//func (p *proxyConnection) ProcessExtendedQuery(testID string, query string, params [][]byte, formatCodes []int16) error {
-//	if p.server.Pgtest.GetSession(testID) == nil {
-//		return fmt.Errorf("sessão não encontrada para testID: %s", testID)
-//	}
-//
-//	interceptedQuery, err := p.server.Pgtest.InterceptQuery(testID, query, p.connectionID())
-//	if err != nil {
-//		return err
-//	}
-//
-//	if interceptedQuery == "" || interceptedQuery == "-- intercepted" {
-//		p.backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SELECT")})
-//		return nil
-//	}
-//
-//	args := bindParamsToArgs(params, formatCodes)
-//	// false = NÃO enviar ReadyForQuery (esperar Sync)
-//	return p.ExecuteInterpretedQuery(testID, interceptedQuery, false, args...)
-//}

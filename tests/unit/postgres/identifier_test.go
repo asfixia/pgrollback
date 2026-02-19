@@ -19,8 +19,8 @@ func TestQuoteIdentifier(t *testing.T) {
 		},
 		{
 			name:     "identifier with underscore",
-			input:    "pgtest_table",
-			expected: `"pgtest_table"`,
+			input:    "pgrollback_table",
+			expected: `"pgrollback_table"`,
 		},
 		{
 			name:     "identifier with quotes",
@@ -64,8 +64,8 @@ func TestQuoteQualifiedName(t *testing.T) {
 		{
 			name:     "simple qualified name",
 			schema:   "public",
-			table:    "pgtest_table",
-			expected: `"public"."pgtest_table"`,
+			table:    "pgrollback_table",
+			expected: `"public"."pgrollback_table"`,
 		},
 		{
 			name:     "with quotes in names",
@@ -76,8 +76,8 @@ func TestQuoteQualifiedName(t *testing.T) {
 		{
 			name:     "mixed case",
 			schema:   "PublicSchema",
-			table:    "PgTest_Table",
-			expected: `"PublicSchema"."PgTest_Table"`,
+			table:    "PgRollback_Table",
+			expected: `"PublicSchema"."PgRollback_Table"`,
 		},
 	}
 

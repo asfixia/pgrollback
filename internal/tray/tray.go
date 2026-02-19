@@ -41,18 +41,18 @@ func proxyAddressFromGUIURL(guiURL string) string {
 func onReady(guiURL string) {
 	// Custom icon built at runtime (PostgreSQL-inspired blue with \"PT\" letters).
 	systray.SetIcon(generateIconBase64())
-	systray.SetTitle("PGTest")
+	systray.SetTitle("PgRollback")
 	proxyAddr := proxyAddressFromGUIURL(guiURL)
-	systray.SetTooltip(fmt.Sprintf("PGTest Proxy – %s", proxyAddr))
+	systray.SetTooltip(fmt.Sprintf("PgRollback Proxy – %s", proxyAddr))
 
-	mOpen := systray.AddMenuItem(fmt.Sprintf("Open GUI \"%s\"", guiURL), "Open PGTest GUI in the browser")
+	mOpen := systray.AddMenuItem(fmt.Sprintf("Open GUI \"%s\"", guiURL), "Open PgRollback GUI in the browser")
 	mRollbackAll := systray.AddMenuItem("Rollback All", "Disconnect all clients (rollback all sessions)")
 	systray.AddSeparator()
 	mProxy := systray.AddMenuItem("PostgreSQL proxy: "+proxyAddr, "Address to use as host:port in your app")
 	mProxy.Disable()
 	mCopy := systray.AddMenuItem("Copy connection URL", "Copy host=... port=... to clipboard")
 	systray.AddSeparator()
-	mQuit := systray.AddMenuItem("Quit", "Stop PGTest and exit")
+	mQuit := systray.AddMenuItem("Quit", "Stop PgRollback and exit")
 
 	connectionLine := connectionString(proxyAddr)
 

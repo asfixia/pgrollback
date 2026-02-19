@@ -8,7 +8,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib" // Driver para database/sql
 )
 
-// TestSelect1AsUm testa conexão ao pgtest usando database/sql e executa SELECT 1 as um.
+// TestSelect1AsUm testa conexão ao pgrollback usando database/sql e executa SELECT 1 as um.
 func TestSelect1AsUm(t *testing.T) {
 	cfg := getConfigForProxyTest(t)
 	if cfg == nil {
@@ -36,7 +36,7 @@ func TestSelect1AsUm(t *testing.T) {
 	}
 
 	t.Logf("Successfully executed SELECT 1 as um and got result: %d", result)
-	t.Logf("This confirms the pgtest server correctly handles SELECT queries with column aliases")
+	t.Logf("This confirms the pgrollback server correctly handles SELECT queries with column aliases")
 }
 
 // TestSelectSiteUser runs SELECT * FROM p_conab_cafe.site_user LIMIT 10 through the proxy,

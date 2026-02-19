@@ -20,7 +20,7 @@ import (
 // ErrNoOpenUserTransaction is returned when COMMIT or ROLLBACK is executed but there is no open user transaction on this connection.
 var ErrNoOpenUserTransaction = errors.New("there is no open transaction on this connection")
 
-const pgtestSavepointPrefix = "pgtest_v_"
+const pgrollbackSavepointPrefix = "pgrollback_v_"
 
 // PrintR é uma função utilitária similar ao print_r do PHP
 // Imprime estruturas de dados de forma legível para debugging
@@ -265,9 +265,9 @@ func (p *proxyConnection) clearStatementPortalState() {
 
 // deallocateBackendStatementsOnDisconnect deallocates all of this connection's backend prepared
 // statements (skips multi-statement; those were never prepared) and clears per-connection state.
-// Call on disconnect so the shared backend is clean. Uses session from p.server.Pgtest.GetSession(testID).
+// Call on disconnect so the shared backend is clean. Uses session from p.server.PgRollback.GetSession(testID).
 func (p *proxyConnection) deallocateBackendStatementsOnDisconnect(testID string) {
-	session := p.server.Pgtest.GetSession(testID)
+	session := p.server.PgRollback.GetSession(testID)
 	if session == nil || session.DB == nil {
 		return
 	}
@@ -290,9 +290,9 @@ func (p *proxyConnection) deallocateBackendStatementsOnDisconnect(testID string)
 
 // rollbackUserSavepointsOnDisconnect rolls back any open user savepoints (from BEGIN not yet
 // COMMIT/ROLLBACK) when this connection disconnects, so the session state matches real PostgreSQL
-// behavior (implicit rollback on disconnect). Uses session from p.server.Pgtest.GetSession(testID).
+// behavior (implicit rollback on disconnect). Uses session from p.server.PgRollback.GetSession(testID).
 func (p *proxyConnection) rollbackUserSavepointsOnDisconnect(testID string) {
-	session := p.server.Pgtest.GetSession(testID)
+	session := p.server.PgRollback.GetSession(testID)
 	if session == nil || session.DB == nil {
 		return
 	}
@@ -302,9 +302,9 @@ func (p *proxyConnection) rollbackUserSavepointsOnDisconnect(testID string) {
 }
 
 // releaseOpenTransactionOnDisconnect releases this connection's claim on the session's open
-// transaction when the connection disconnects. Uses session from p.server.Pgtest.GetSession(testID).
+// transaction when the connection disconnects. Uses session from p.server.PgRollback.GetSession(testID).
 func (p *proxyConnection) releaseOpenTransactionOnDisconnect(testID string) {
-	session := p.server.Pgtest.GetSession(testID)
+	session := p.server.PgRollback.GetSession(testID)
 	if session == nil || session.DB == nil {
 		return
 	}
@@ -373,7 +373,7 @@ func (p *proxyConnection) ApplyTCLSuccessTracking(query string, session *TestSes
 			continue
 		}
 		savepointName := sql.GetSavepointName(stmt)
-		if savepointName == "" || !strings.HasPrefix(savepointName, pgtestSavepointPrefix) {
+		if savepointName == "" || !strings.HasPrefix(savepointName, pgrollbackSavepointPrefix) {
 			continue
 		}
 		if sql.IsSavepoint(stmt) {
@@ -423,7 +423,7 @@ func (p *proxyConnection) ApplyTCLSuccessTrackingLocked(query string, session *T
 			continue
 		}
 		savepointName := sql.GetSavepointName(stmt)
-		if savepointName == "" || !strings.HasPrefix(savepointName, pgtestSavepointPrefix) {
+		if savepointName == "" || !strings.HasPrefix(savepointName, pgrollbackSavepointPrefix) {
 			continue
 		}
 		if sql.IsSavepoint(stmt) {
@@ -461,7 +461,7 @@ func (p *proxyConnection) ApplyTCLSuccessTrackingLocked(query string, session *T
 // When we have a cache from the real PostgreSQL (first connection), we replay those;
 // otherwise we fall back to hardcoded defaults.
 func (p *proxyConnection) sendInitialProtocolMessages() error {
-	cache := p.server.Pgtest.GetBackendStartupCache()
+	cache := p.server.PgRollback.GetBackendStartupCache()
 	if cache != nil && len(cache.ParameterStatuses) > 0 {
 		for i := range cache.ParameterStatuses {
 			ps := &cache.ParameterStatuses[i]

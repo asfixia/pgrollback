@@ -83,8 +83,8 @@ func (d *Duration) UnmarshalJSON(data []byte) error {
 type TestConfig struct {
 	Schema         string   `yaml:"schema" json:"schema"`
 	ContextTimeout Duration `yaml:"context_timeout" json:"context_timeout"` // Timeout para contexto principal dos testes
-	QueryTimeout   Duration `yaml:"query_timeout" json:"query_timeout"`   // Timeout para execução de queries
-	PingTimeout    Duration `yaml:"ping_timeout" json:"ping_timeout"`     // Timeout para ping
+	QueryTimeout   Duration `yaml:"query_timeout" json:"query_timeout"`     // Timeout para execução de queries
+	PingTimeout    Duration `yaml:"ping_timeout" json:"ping_timeout"`       // Timeout para ping
 }
 
 // LoadConfigResult contém o resultado do carregamento da configuração
@@ -226,25 +226,25 @@ func loadFromEnv(config *Config) {
 			}
 		}, nil},
 		// Proxy
-		{"PGTEST_LISTEN_HOST", func(v string) { config.Proxy.ListenHost = v }, nil},
-		{"PGTEST_LISTEN_PORT", func(v string) {
+		{"PGROLLBACK_LISTEN_HOST", func(v string) { config.Proxy.ListenHost = v }, nil},
+		{"PGROLLBACK_LISTEN_PORT", func(v string) {
 			if p, err := strconv.Atoi(v); err == nil {
 				config.Proxy.ListenPort = p
 			}
 		}, nil},
-		{"PGTEST_TIMEOUT", func(v string) {
+		{"PGROLLBACK_TIMEOUT", func(v string) {
 			if d, err := time.ParseDuration(v); err == nil {
 				config.Proxy.Timeout = d
 			}
 		}, nil},
-		{"PGTEST_KEEPALIVE_INTERVAL", func(v string) {
+		{"PGROLLBACK_KEEPALIVE_INTERVAL", func(v string) {
 			if d, err := time.ParseDuration(v); err == nil {
 				config.Proxy.KeepaliveInterval = Duration{Duration: d}
 			}
 		}, nil},
 		// Logging
-		{"PGTEST_LOG_LEVEL", func(v string) { config.Logging.Level = v }, nil},
-		{"PGTEST_LOG_FILE", func(v string) { config.Logging.File = v }, nil},
+		{"PGROLLBACK_LOG_LEVEL", func(v string) { config.Logging.Level = v }, nil},
+		{"PGROLLBACK_LOG_FILE", func(v string) { config.Logging.File = v }, nil},
 	}
 
 	for _, mapping := range envMappings {

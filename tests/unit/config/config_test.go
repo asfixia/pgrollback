@@ -121,23 +121,23 @@ func TestLoadConfigInternally(t *testing.T) {
 }
 
 func TestLoadConfig_FromEnvVar(t *testing.T) {
-	// Testa se variável de ambiente PGTEST_CONFIG funciona
-	originalEnv := os.Getenv("PGTEST_CONFIG")
+	// Testa se variável de ambiente PGROLLBACK_CONFIG funciona
+	originalEnv := os.Getenv("PGROLLBACK_CONFIG")
 	defer func() {
 		if originalEnv != "" {
-			os.Setenv("PGTEST_CONFIG", originalEnv)
+			os.Setenv("PGROLLBACK_CONFIG", originalEnv)
 		} else {
-			os.Unsetenv("PGTEST_CONFIG")
+			os.Unsetenv("PGROLLBACK_CONFIG")
 		}
 	}()
 
 	// Define variável de ambiente apontando para o arquivo de config
 	configPath := "config/pgrollback.yaml"
-	os.Setenv("PGTEST_CONFIG", configPath)
+	os.Setenv("PGROLLBACK_CONFIG", configPath)
 
 	cfg, err := config.LoadConfig(tstproxy.GetConfigPath())
 	if err != nil {
-		t.Fatalf("config.LoadConfig() with PGTEST_CONFIG error = %v", err)
+		t.Fatalf("config.LoadConfig() with PGROLLBACK_CONFIG error = %v", err)
 	}
 
 	if cfg == nil {
@@ -197,12 +197,12 @@ func TestLoadConfig_EnvOverrides(t *testing.T) {
 }
 
 func TestLoadConfig_ValidYAML(t *testing.T) {
-	// Testa se arquivo YAML válido é parseado corretamente (pgtest.yaml, não transient)
+	// Testa se arquivo YAML válido é parseado corretamente (pgrollback.yaml, não transient)
 	projectRoot := testutil.ProjectRoot()
 	if projectRoot == "" {
 		t.Skip("Could not find project root (go.mod not found)")
 	}
-	configPath := filepath.Join(projectRoot, "config", "pgtest.yaml")
+	configPath := filepath.Join(projectRoot, "config", "pgrollback.yaml")
 
 	// Verifica se arquivo existe
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {

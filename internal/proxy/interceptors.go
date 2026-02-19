@@ -11,18 +11,18 @@ import (
 const (
 	DEFAULT_SELECT_ONE    = "-- ping"
 	DEFAULT_SELECT_ZERO   = "-- ping"
-	FULLROLLBACK_SENTINEL = "-- fullrollback" // "pgtest rollback" response: single CommandComplete+ReadyForQuery, no DB
+	FULLROLLBACK_SENTINEL = "-- fullrollback" // "pgrollback rollback" response: single CommandComplete+ReadyForQuery, no DB
 )
 
 // InterceptQuery intercepta e modifica queries específicas antes da execução.
 // connID is the connection making the request; pass 0 when there is no connection (e.g. tests). When connID != 0, BEGIN fails if another connection already has an open transaction.
-// PGTEST commands are checked first (not valid SQL). TCL (BEGIN/COMMIT/ROLLBACK) is detected via AST when parse succeeds.
-func (p *PGTest) InterceptQuery(testID string, query string, connID ConnectionID) (string, error) {
+// PGROLLBACK commands are checked first (not valid SQL). TCL (BEGIN/COMMIT/ROLLBACK) is detected via AST when parse succeeds.
+func (p *PgRollback) InterceptQuery(testID string, query string, connID ConnectionID) (string, error) {
 	queryTrimmed := strings.TrimSpace(query)
 	queryUpper := strings.ToUpper(queryTrimmed)
 
-	if strings.HasPrefix(queryUpper, "PGTEST") {
-		return p.handlePGTestCommand(testID, queryTrimmed)
+	if strings.HasPrefix(queryUpper, "PGROLLBACK") {
+		return p.handlePgRollbackCommand(testID, queryTrimmed)
 	}
 
 	stmts, err := sql.ParseStatements(query)
@@ -54,12 +54,12 @@ func (p *PGTest) InterceptQuery(testID string, query string, connID ConnectionID
 	return query, nil
 }
 
-// handlePGTestCommand processa comandos PGTEST especiais
+// handlePgRollbackCommand processa comandos PgRollback especiais
 // Usa o testID da sessão quando disponível, evitando a necessidade de passá-lo como parâmetro
-func (p *PGTest) handlePGTestCommand(testID string, query string) (string, error) {
+func (p *PgRollback) handlePgRollbackCommand(testID string, query string) (string, error) {
 	parts := strings.Fields(query)
 	if len(parts) < 2 {
-		return "", fmt.Errorf("comando pgtest inválido: %s", query)
+		return "", fmt.Errorf("comando pgrollback inválido: %s", query)
 	}
 
 	action := strings.ToLower(parts[1])
@@ -100,11 +100,11 @@ func (p *PGTest) handlePGTestCommand(testID string, query string) (string, error
 // - When connID != 0, BEGIN fails with ErrOnlyOneTransactionAtATime if connectionWithOpenTx is another connection.
 //
 // Caso de uso PHP:
-// - PHP conecta → executa BEGIN → cria savepoint pgtest_v_1 (ponto de início)
-// - PHP faz comandos → executa BEGIN novamente → cria savepoint pgtest_v_2
-// - PHP executa ROLLBACK → faz rollback até pgtest_v_2 (não afeta pgtest_v_1)
+// - PHP conecta → executa BEGIN → cria savepoint pgrollback_v_1 (ponto de início)
+// - PHP faz comandos → executa BEGIN novamente → cria savepoint pgrollback_v_2
+// - PHP executa ROLLBACK → faz rollback até pgrollback_v_2 (não afeta pgrollback_v_1)
 // - PHP desconecta → próxima conexão PHP com mesmo testID pode continuar de onde parou
-func (p *PGTest) handleBegin(testID string, connID ConnectionID) (string, error) {
+func (p *PgRollback) handleBegin(testID string, connID ConnectionID) (string, error) {
 	session := p.GetSession(testID)
 	if session == nil {
 		return "", fmt.Errorf("Session not found '%s'", testID)
@@ -113,7 +113,7 @@ func (p *PGTest) handleBegin(testID string, connID ConnectionID) (string, error)
 }
 
 // handleCommit converte COMMIT em RELEASE SAVEPOINT
-func (p *PGTest) handleCommit(testID string) (string, error) {
+func (p *PgRollback) handleCommit(testID string) (string, error) {
 	session := p.GetSession(testID)
 	if session == nil {
 		return "", fmt.Errorf("Transaction was not found to do a Commit on '%s'", testID)
@@ -131,7 +131,7 @@ func (p *PGTest) handleCommit(testID string) (string, error) {
 // - PHP executa ROLLBACK → reverte até o último savepoint criado por esta conexão
 // - Isso permite que cada conexão/cliente tenha seu próprio rollback isolado
 // - O rollback não afeta outras conexões que compartilham a mesma sessão/testID
-func (p *PGTest) handleRollback(testID string) (string, error) {
+func (p *PgRollback) handleRollback(testID string) (string, error) {
 	session := p.GetSession(testID)
 	if session == nil {
 		return "", fmt.Errorf("Error no session for ID: '%s'", testID)
@@ -140,7 +140,7 @@ func (p *PGTest) handleRollback(testID string) (string, error) {
 }
 
 // buildStatusResultSet constrói uma query SELECT para status de uma sessão
-func (p *PGTest) buildStatusResultSet(testID string) (string, error) {
+func (p *PgRollback) buildStatusResultSet(testID string) (string, error) {
 	session := p.GetSession(testID)
 	if session == nil {
 		return "", fmt.Errorf("Session with testID '%s', was not found", testID)
@@ -149,7 +149,7 @@ func (p *PGTest) buildStatusResultSet(testID string) (string, error) {
 }
 
 // buildListResultSet constrói uma query SELECT para listar todas as sessões
-func (p *PGTest) buildListResultSet() (string, error) {
+func (p *PgRollback) buildListResultSet() (string, error) {
 	sessions := p.GetAllSessions()
 	if len(sessions) == 0 {
 		return "SELECT NULL AS test_id, false AS active, 0 AS level, NULL AS created_at WHERE 1=0", nil

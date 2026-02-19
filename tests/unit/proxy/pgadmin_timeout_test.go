@@ -28,10 +28,10 @@ func TestPGAdminConnectionNoTimeout(t *testing.T) {
 	pingCancel()
 	if err != nil {
 		elapsed := time.Since(startTime)
-		t.Fatalf("Failed to ping pgtest server (elapsed: %v): %v", elapsed, err)
+		t.Fatalf("Failed to ping pgrollback server (elapsed: %v): %v", elapsed, err)
 	}
 	elapsed := time.Since(startTime)
-	t.Logf("Successfully pinged pgtest server in %v (timeout was %v)", elapsed, pingTimeout)
+	t.Logf("Successfully pinged pgrollback server in %v (timeout was %v)", elapsed, pingTimeout)
 
 	queryTimeout := getOrDefault(cfg.Test.QueryTimeout.Duration, 5*time.Second)
 	queryCtx, queryCancel := context.WithTimeout(ctx, queryTimeout)
@@ -47,5 +47,5 @@ func TestPGAdminConnectionNoTimeout(t *testing.T) {
 		t.Errorf("Expected query result to be 1, got %d", result)
 	}
 
-	t.Logf("Successfully connected to pgtest server and executed query without timeout")
+	t.Logf("Successfully connected to pgrollback server and executed query without timeout")
 }

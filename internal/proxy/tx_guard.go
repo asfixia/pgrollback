@@ -135,5 +135,5 @@ func releaseSavepoint(ctx context.Context, tx pgxQueryer, savepointName string) 
 
 func newGuardSavepointName() string {
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	return fmt.Sprintf("pgtest_exec_guard_%v", r.Int31())
+	return fmt.Sprintf("pgrollback_exec_guard_%v", r.Int31())
 }

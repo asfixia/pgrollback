@@ -16,7 +16,7 @@ func TestExtractTestID(t *testing.T) {
 		{
 			name: "valid test id",
 			params: map[string]string{
-				"application_name": "pgtest_abc123",
+				"application_name": "pgrollback_abc123",
 			},
 			want:    "abc123",
 			wantErr: false,
@@ -24,7 +24,7 @@ func TestExtractTestID(t *testing.T) {
 		{
 			name: "valid test id with underscore",
 			params: map[string]string{
-				"application_name": "pgtest_test_123",
+				"application_name": "pgrollback_test_123",
 			},
 			want:    "test_123",
 			wantErr: false,
@@ -86,17 +86,17 @@ func TestBuildStartupMessageForPostgres(t *testing.T) {
 		{
 			name: "replace application_name",
 			params: map[string]string{
-				"application_name": "pgtest_abc123",
+				"application_name": "pgrollback_abc123",
 				"database":         "mydb",
 			},
-			want: "pgtest-proxy",
+			want: "pgrollback-proxy",
 		},
 		{
 			name: "add application_name if missing",
 			params: map[string]string{
 				"database": "mydb",
 			},
-			want: "pgtest-proxy",
+			want: "pgrollback-proxy",
 		},
 	}
 

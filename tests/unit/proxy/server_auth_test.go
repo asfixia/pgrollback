@@ -26,7 +26,7 @@ func TestServerAuthenticationHandshake(t *testing.T) {
 		t.Errorf("Expected query result to be 1, got %d", result)
 	}
 
-	session := proxyServer.Pgtest.GetSession("test_auth")
+	session := proxyServer.PgRollback.GetSession("test_auth")
 	if session == nil {
 		t.Log("Session 'test_auth' not found (this is expected if application_name extraction works correctly)")
 	}
@@ -53,7 +53,7 @@ func TestServerAuthenticationHandshake_DefaultAppName(t *testing.T) {
 		t.Errorf("Expected query result to be 1, got %d", result)
 	}
 
-	session := proxyServer.Pgtest.GetSession("default")
+	session := proxyServer.PgRollback.GetSession("default")
 	if session == nil {
 		t.Error("Session with testID 'default' should be created")
 	}

@@ -6,18 +6,18 @@ import (
 	"strconv"
 )
 
-// NewPGTestFromConfigForTesting cria uma instância PGTest a partir da configuração para testes
+// NewPgRollbackFromConfigForTesting cria uma instância PGROLLBACK a partir da configuração para testes
 // Esta função é exportada para permitir que testes em outros packages a usem
-func NewPGTestFromConfigForTesting() *PGTest {
-	return newPGTestFromConfig()
+func NewPgRollbackFromConfigForTesting() *PgRollback {
+	return newPgRollbackFromConfig()
 }
 
-func GetNonUsedTestID(pgtest *PGTest) string {
+func GetNonUsedTestID(pgrollback *PgRollback) string {
 	r := rand.New(rand.NewSource(100000000))
 	newSessionTestId := ""
 	for {
 		newSessionTestId = strconv.Itoa(int(r.Int31()))
-		if pgtest.GetSession(newSessionTestId) == nil {
+		if pgrollback.GetSession(newSessionTestId) == nil {
 			break
 		}
 	}
@@ -26,8 +26,8 @@ func GetNonUsedTestID(pgtest *PGTest) string {
 
 // NewTestSessionForTesting cria uma instância TestSession para testes
 // Esta função é exportada para permitir que testes em outros packages a usem
-func NewTestSessionForTesting(pgtest *PGTest) *TestSession {
-	session, err := pgtest.GetOrCreateSession(GetNonUsedTestID(pgtest))
+func NewTestSessionForTesting(pgrollback *PgRollback) *TestSession {
+	session, err := pgrollback.GetOrCreateSession(GetNonUsedTestID(pgrollback))
 	if err != nil {
 		return nil
 	}
@@ -39,15 +39,15 @@ const testSetupConnectionID ConnectionID = 0
 
 // NewTestSessionWithLevel cria uma instância TestSession com nível de savepoint 1 para testes.
 // Executa um BEGIN (SAVEPOINT) e aplica claim + incremento de nível.
-func NewTestSessionWithLevel(pgtest *PGTest, testID string) *TestSession {
-	session, err := pgtest.GetOrCreateSession(testID)
+func NewTestSessionWithLevel(pgrollback *PgRollback, testID string) *TestSession {
+	session, err := pgrollback.GetOrCreateSession(testID)
 	if err != nil {
 		return nil
 	}
 	if session.DB == nil || !session.DB.HasActiveTransaction() {
 		return nil
 	}
-	q, err := pgtest.handleBegin(testID, testSetupConnectionID)
+	q, err := pgrollback.handleBegin(testID, testSetupConnectionID)
 	if err != nil {
 		return nil
 	}

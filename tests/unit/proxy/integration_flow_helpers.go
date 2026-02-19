@@ -12,10 +12,10 @@ import (
 
 // createTable cria uma tabela usando ExecuteWithLock e falha o teste se houver erro.
 // Usa a função unificada do pacote testutil internamente.
-func createTable(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, tableName string, columns string) {
+func createTable(t *testing.T, pgrollback *proxy.PgRollback, session *proxy.TestSession, tableName string, columns string) {
 	t.Helper()
 	createTableQuery := fmt.Sprintf("CREATE TABLE %s (%s)", tableName, columns)
-	err := pgtest.ExecuteWithLock(session, createTableQuery)
+	err := pgrollback.ExecuteWithLock(session, createTableQuery)
 	if err != nil {
 		t.Fatalf("Failed to create table %s: %v", tableName, err)
 	}
@@ -23,7 +23,7 @@ func createTable(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession,
 
 // createTableWithIdAndName cria uma tabela com colunas (id SERIAL PRIMARY KEY, name VARCHAR(100)).
 // Usa a função unificada do pacote testutil.
-func createTableWithIdAndName(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, tableName string) {
+func createTableWithIdAndName(t *testing.T, pgrollback *proxy.PgRollback, session *proxy.TestSession, tableName string) {
 	t.Helper()
 	if session == nil || session.DB == nil {
 		t.Fatalf("Session or session.DB is nil")
@@ -36,31 +36,31 @@ func createTableWithIdAndName(t *testing.T, pgtest *proxy.PGTest, session *proxy
 
 // createTableWithIdAndData cria uma tabela com colunas (id SERIAL PRIMARY KEY, data VARCHAR(100)).
 // Usa a função unificada do pacote testutil.
-func createTableWithIdAndData(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, tableName string) {
+func createTableWithIdAndData(t *testing.T, pgrollback *proxy.PgRollback, session *proxy.TestSession, tableName string) {
 	t.Helper()
 	if session.DB != nil && session.DB.HasActiveTransaction() {
 		testutil.CreateTableWithIdAndData(t, session.DB.Tx(), tableName)
 	} else {
-		createTable(t, pgtest, session, tableName, "id SERIAL PRIMARY KEY, data VARCHAR(100)")
+		createTable(t, pgrollback, session, tableName, "id SERIAL PRIMARY KEY, data VARCHAR(100)")
 	}
 }
 
 // createTableWithId cria uma tabela com apenas coluna id INT.
 // Usa a função unificada do pacote testutil.
-func createTableWithId(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, tableName string) {
+func createTableWithId(t *testing.T, pgrollback *proxy.PgRollback, session *proxy.TestSession, tableName string) {
 	t.Helper()
 	if session.DB != nil && session.DB.HasActiveTransaction() {
 		testutil.CreateTableWithId(t, session.DB.Tx(), tableName)
 	} else {
-		createTable(t, pgtest, session, tableName, "id INT")
+		createTable(t, pgrollback, session, tableName, "id INT")
 	}
 }
 
 // insertRow insere uma linha na tabela usando ExecuteWithLock e falha o teste se houver erro.
-func insertRow(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, tableName string, values string) {
+func insertRow(t *testing.T, pgrollback *proxy.PgRollback, session *proxy.TestSession, tableName string, values string) {
 	t.Helper()
 	insertQuery := fmt.Sprintf("INSERT INTO %s %s", tableName, values)
-	err := pgtest.ExecuteWithLock(session, insertQuery)
+	err := pgrollback.ExecuteWithLock(session, insertQuery)
 	if err != nil {
 		t.Fatalf("Failed to insert row into %s: %v", tableName, err)
 	}
@@ -68,7 +68,7 @@ func insertRow(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, t
 
 // insertRowWithName insere uma linha na tabela com coluna name.
 // Usa a função unificada do pacote testutil quando possível.
-func insertRowWithName(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, tableName string, nameValue string) {
+func insertRowWithName(t *testing.T, pgrollback *proxy.PgRollback, session *proxy.TestSession, tableName string, nameValue string) {
 	t.Helper()
 	if session == nil || session.DB == nil {
 		t.Fatalf("Session or session.DB is nil")
@@ -81,12 +81,12 @@ func insertRowWithName(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSe
 
 // insertRowWithData insere uma linha na tabela com coluna data.
 // Usa a função unificada do pacote testutil quando possível.
-func insertRowWithData(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, tableName string, dataValue string) {
+func insertRowWithData(t *testing.T, pgrollback *proxy.PgRollback, session *proxy.TestSession, tableName string, dataValue string) {
 	t.Helper()
 	if session.DB != nil && session.DB.HasActiveTransaction() {
 		testutil.InsertRowWithData(t, session.DB.Tx(), tableName, dataValue, "")
 	} else {
-		insertRow(t, pgtest, session, tableName, fmt.Sprintf("(data) VALUES ('%s')", dataValue))
+		insertRow(t, pgrollback, session, tableName, fmt.Sprintf("(data) VALUES ('%s')", dataValue))
 	}
 }
 
@@ -146,9 +146,9 @@ func applyCommitOrRollbackSuccess(session *proxy.TestSession, connID uintptr) {
 
 // execBeginAndVerify executa BEGIN através do interceptor. Se o interceptor retornar SAVEPOINT, aplica
 // os efeitos (claim + nível). Se retornar DEFAULT_SELECT_ONE (no-op, single level), apenas executa e verifica que o nível não mudou.
-func execBeginAndVerify(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, expectedLevel int, contextMsg string) {
+func execBeginAndVerify(t *testing.T, pgrollback *proxy.PgRollback, session *proxy.TestSession, expectedLevel int, contextMsg string) {
 	t.Helper()
-	query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "BEGIN", testConnectionID)
+	query, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "BEGIN", testConnectionID)
 	if err != nil {
 		msg := "InterceptQuery(BEGIN) error"
 		if contextMsg != "" {
@@ -186,9 +186,9 @@ func execBeginAndVerify(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestS
 }
 
 // execCommitOnLevel executa COMMIT através do interceptor, aplica os efeitos (DecrementSavepointLevel/Release) e verifica o nível de savepoint.
-func execCommitOnLevel(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, expectedLevel int, contextMsg string) {
+func execCommitOnLevel(t *testing.T, pgrollback *proxy.PgRollback, session *proxy.TestSession, expectedLevel int, contextMsg string) {
 	t.Helper()
-	query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "COMMIT", 0)
+	query, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "COMMIT", 0)
 	if err != nil {
 		msg := "InterceptQuery(COMMIT) error"
 		if contextMsg != "" {
@@ -220,9 +220,9 @@ func execCommitOnLevel(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSe
 }
 
 // execRollbackAndVerify executa ROLLBACK através do interceptor, aplica os efeitos (DecrementSavepointLevel/Release) e verifica o nível de savepoint.
-func execRollbackAndVerify(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, expectedLevel int, contextMsg string) {
+func execRollbackAndVerify(t *testing.T, pgrollback *proxy.PgRollback, session *proxy.TestSession, expectedLevel int, contextMsg string) {
 	t.Helper()
-	query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "ROLLBACK", 0)
+	query, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "ROLLBACK", 0)
 	if err != nil {
 		msg := "InterceptQuery(ROLLBACK) error"
 		if contextMsg != "" {
@@ -254,9 +254,9 @@ func execRollbackAndVerify(t *testing.T, pgtest *proxy.PGTest, session *proxy.Te
 }
 
 // assertCommitBlocked verifica que COMMIT está bloqueado
-func assertCommitBlocked(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, contextMsg string) {
+func assertCommitBlocked(t *testing.T, pgrollback *proxy.PgRollback, session *proxy.TestSession, contextMsg string) {
 	t.Helper()
-	query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "COMMIT", 0)
+	query, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "COMMIT", 0)
 	if err != nil {
 		msg := "InterceptQuery(COMMIT) error"
 		if contextMsg != "" {
@@ -274,9 +274,9 @@ func assertCommitBlocked(t *testing.T, pgtest *proxy.PGTest, session *proxy.Test
 }
 
 // assertRollbackBlocked verifica que ROLLBACK está bloqueado
-func assertRollbackBlocked(t *testing.T, pgtest *proxy.PGTest, session *proxy.TestSession, contextMsg string) {
+func assertRollbackBlocked(t *testing.T, pgrollback *proxy.PgRollback, session *proxy.TestSession, contextMsg string) {
 	t.Helper()
-	query, err := pgtest.InterceptQuery(pgtest.GetTestID(session), "ROLLBACK", 0)
+	query, err := pgrollback.InterceptQuery(pgrollback.GetTestID(session), "ROLLBACK", 0)
 	if err != nil {
 		msg := "InterceptQuery(ROLLBACK) error"
 		if contextMsg != "" {

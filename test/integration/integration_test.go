@@ -1,7 +1,7 @@
-// Testes de integração do pgtest: conectam ao proxy e ao PostgreSQL real.
+// Testes de integração do pgrollback: conectam ao proxy e ao PostgreSQL real.
 //
 // Estrutura do arquivo:
-// 1. Variáveis globais e TestMain — inicia o servidor pgtest antes dos testes
+// 1. Variáveis globais e TestMain — inicia o servidor pgrollback antes dos testes
 // 2. Testes — TestProtectionAgainstAccidentalCommit, etc.
 //
 // Funções utilitárias estão em integration_test_helpers.go
@@ -24,7 +24,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-var pgtestServer *proxy.Server
+var pgServer *proxy.Server
 
 // --- 1. TestMain e helpers de debug ---
 
@@ -46,21 +46,21 @@ func TestMain(m *testing.M) {
 	}
 
 	// Usa porta da configuração
-	pgtestListenPort := cfg.Proxy.ListenPort
-	if pgtestListenPort == 0 {
+	pgrollbackListenPort := cfg.Proxy.ListenPort
+	if pgrollbackListenPort == 0 {
 		// Se não configurada, usa 5433 como padrão para testes
-		pgtestListenPort = 5433
+		pgrollbackListenPort = 5433
 	}
 
 	// Avisa se estiver usando porta 5432 (pode conflitar com PostgreSQL real)
-	if pgtestListenPort == 5432 {
-		logger.Warn("PGTest está usando porta 5432, que pode conflitar com PostgreSQL real")
+	if pgrollbackListenPort == 5432 {
+		logger.Warn("PgRollback está usando porta 5432, que pode conflitar com PostgreSQL real")
 		logger.Warn("Considere usar uma porta diferente (ex: 5433) para testes")
 	}
 
-	useExternalServer := os.Getenv("PGTEST_USE_EXTERNAL_SERVER") == "1" || os.Getenv("PGTEST_USE_EXTERNAL_SERVER") == "true"
+	useExternalServer := os.Getenv("PGROLLBACK_USE_EXTERNAL_SERVER") == "1" || os.Getenv("PGROLLBACK_USE_EXTERNAL_SERVER") == "true"
 	if useExternalServer {
-		// Servidor pgtest já rodando em outro processo (ex.: para debug sem timeout de conexão).
+		// Servidor pgrollback já rodando em outro processo (ex.: para debug sem timeout de conexão).
 		// Não inicia nem encerra o servidor; os testes usam a porta do config.
 		code := m.Run()
 		os.Exit(code)
@@ -70,7 +70,7 @@ func TestMain(m *testing.M) {
 	if cfg.Proxy.KeepaliveInterval.Duration > 0 {
 		keepaliveInterval = cfg.Proxy.KeepaliveInterval.Duration
 	}
-	pgtestServer = proxy.NewServer(
+	pgServer = proxy.NewServer(
 		cfg.Postgres.Host,
 		cfg.Postgres.Port,
 		cfg.Postgres.Database,
@@ -80,10 +80,10 @@ func TestMain(m *testing.M) {
 		cfg.Postgres.SessionTimeout.Duration,
 		keepaliveInterval,
 		cfg.Proxy.ListenHost,
-		pgtestListenPort,
+		pgrollbackListenPort,
 		false,
 	)
-	if err := pgtestServer.StartError(); err != nil {
+	if err := pgServer.StartError(); err != nil {
 		fmt.Printf("Failed to start server: %v\n", err)
 		os.Exit(1)
 	}
@@ -92,7 +92,7 @@ func TestMain(m *testing.M) {
 
 	code := m.Run()
 
-	pgtestServer.Stop()
+	pgServer.Stop()
 	os.Exit(code)
 }
 
@@ -100,155 +100,155 @@ func TestMain(m *testing.M) {
 
 func TestProtectionAgainstAccidentalCommit(t *testing.T) {
 	testID := "test_commit_protection"
-	pgtestDB := connectToPGTestProxy(t, testID)
-	defer pgtestDB.Close()
-	execBegin(t, pgtestDB, "First BEGIN: pgtest converts to SAVEPOINT (creates base transaction if needed)")
+	pgrollbackDB := connectToPgRollbackProxy(t, testID)
+	defer pgrollbackDB.Close()
+	execBegin(t, pgrollbackDB, "First BEGIN: pgrollback converts to SAVEPOINT (creates base transaction if needed)")
 	schema := getTestSchema()
-	tableName := postgres.QuoteQualifiedName(schema, "pgtest_commit_protection")
-	createTableWithValueColumn(t, pgtestDB, tableName)
-	insertOneRow(t, pgtestDB, tableName, "before_commit", "Insert row before COMMIT to test commit protection")
-	assertTableRowCount(t, pgtestDB, tableName, 1, "Table has 1 row: CREATE TABLE + INSERT in base transaction")
-	execCommit(t, pgtestDB)
-	assertTableRowCount(t, pgtestDB, tableName, 1, "After COMMIT (RELEASE SAVEPOINT): table still exists with 1 row - COMMIT only releases savepoint, changes remain in base transaction")
-	execRollback(t, pgtestDB) //No transaction to rollback
-	assertTableRowCount(t, pgtestDB, tableName, 1, "No Transaction to rollback, table still exists with 1 row")
+	tableName := postgres.QuoteQualifiedName(schema, "pgrollback_commit_protection")
+	createTableWithValueColumn(t, pgrollbackDB, tableName)
+	insertOneRow(t, pgrollbackDB, tableName, "before_commit", "Insert row before COMMIT to test commit protection")
+	assertTableRowCount(t, pgrollbackDB, tableName, 1, "Table has 1 row: CREATE TABLE + INSERT in base transaction")
+	execCommit(t, pgrollbackDB)
+	assertTableRowCount(t, pgrollbackDB, tableName, 1, "After COMMIT (RELEASE SAVEPOINT): table still exists with 1 row - COMMIT only releases savepoint, changes remain in base transaction")
+	execRollback(t, pgrollbackDB) //No transaction to rollback
+	assertTableRowCount(t, pgrollbackDB, tableName, 1, "No Transaction to rollback, table still exists with 1 row")
 
-	execCommit(t, pgtestDB)
-	execRollback(t, pgtestDB)
-	assertTableRowCount(t, pgtestDB, tableName, 1, "No change was made 1 row still exists")
+	execCommit(t, pgrollbackDB)
+	execRollback(t, pgrollbackDB)
+	assertTableRowCount(t, pgrollbackDB, tableName, 1, "No change was made 1 row still exists")
 
-	execBegin(t, pgtestDB, "Second BEGIN after COMMIT: pgtest converts to SAVEPOINT (SavepointLevel becomes 1 again)")
-	pingWithTimeout(t, pgtestDB, 5*time.Second, false, "Connection check before second BEGIN")
-	insertOneRow(t, pgtestDB, tableName, "test_value", "Insert row in second transaction after COMMIT")
-	assertTableRowCount(t, pgtestDB, tableName, 2, "Table has 2 rows after INSERT in second transaction")
-	pingWithTimeout(t, pgtestDB, 5*time.Second, true, "Connection check after INSERT in second transaction")
+	execBegin(t, pgrollbackDB, "Second BEGIN after COMMIT: pgrollback converts to SAVEPOINT (SavepointLevel becomes 1 again)")
+	pingWithTimeout(t, pgrollbackDB, 5*time.Second, false, "Connection check before second BEGIN")
+	insertOneRow(t, pgrollbackDB, tableName, "test_value", "Insert row in second transaction after COMMIT")
+	assertTableRowCount(t, pgrollbackDB, tableName, 2, "Table has 2 rows after INSERT in second transaction")
+	pingWithTimeout(t, pgrollbackDB, 5*time.Second, true, "Connection check after INSERT in second transaction")
 	postgresDBDirect := connectToRealPostgres(t)
 	defer postgresDBDirect.Close()
 	pingWithTimeout(t, postgresDBDirect, 5*time.Second, false)
-	assertTableDoesNotExist(t, postgresDBDirect, tableName, "Table does not exist in real PostgreSQL - data only exists in pgtest transaction (not committed)")
-	execRollback(t, pgtestDB)
-	assertTableRowCount(t, pgtestDB, tableName, 1, "After ROLLBACK blocked: table still exists with 1 row - ROLLBACK only reverts INSERT from second transaction, CREATE TABLE and first INSERT remain")
-	execPgTestFullRollback(t, pgtestDB)
+	assertTableDoesNotExist(t, postgresDBDirect, tableName, "Table does not exist in real PostgreSQL - data only exists in pgrollback transaction (not committed)")
+	execRollback(t, pgrollbackDB)
+	assertTableRowCount(t, pgrollbackDB, tableName, 1, "After ROLLBACK blocked: table still exists with 1 row - ROLLBACK only reverts INSERT from second transaction, CREATE TABLE and first INSERT remain")
+	execPgRollbackFullRollback(t, pgrollbackDB)
 	pingWithTimeout(t, postgresDBDirect, 5*time.Second, false)
-	assertTableDoesNotExist(t, postgresDBDirect, tableName, "After pgtest rollback: table does not exist in real PostgreSQL - base transaction was rolled back")
-	assertTableDoesNotExist(t, pgtestDB, tableName, "After pgtest rollback: table does not exist in pgtest - CREATE TABLE was reverted (new empty transaction created)")
+	assertTableDoesNotExist(t, postgresDBDirect, tableName, "After pgrollback rollback: table does not exist in real PostgreSQL - base transaction was rolled back")
+	assertTableDoesNotExist(t, pgrollbackDB, tableName, "After pgrollback rollback: table does not exist in pgrollback - CREATE TABLE was reverted (new empty transaction created)")
 	t.Logf("meupirugluglu: %s", tableName)
 }
 
 func TestProtectionAgainstAccidentalRollback(t *testing.T) {
 	testID := "test_rollback_protection"
-	pgtestProxyDSN := getPGTestProxyDSN(testID)
-	pgtestDB, err := sql.Open("pgx", pgtestProxyDSN)
+	pgrollbackProxyDSN := getPgRollbackProxyDSN(testID)
+	pgrollbackDB, err := sql.Open("pgx", pgrollbackProxyDSN)
 	if err != nil {
-		t.Fatalf("Failed to connect to PGTest: %v", err)
+		t.Fatalf("Failed to connect to PgRollback: %v", err)
 	}
-	defer pgtestDB.Close()
+	defer pgrollbackDB.Close()
 	schema := getTestSchema()
-	tableName := postgres.QuoteQualifiedName(schema, "pgtest_rollback_protection")
-	createTableWithValueColumn(t, pgtestDB, tableName)
-	insertOneRow(t, pgtestDB, tableName, "test_value", "insert row before testing ROLLBACK protection")
-	assertTableRowCount(t, pgtestDB, tableName, 1, "")
-	execRollback(t, pgtestDB)
-	assertTableRowCount(t, pgtestDB, tableName, 1, "Data still exists after ROLLBACK attempt")
-	execPgtestRollback(t, pgtestDB)
-	assertTableDoesNotExist(t, pgtestDB, tableName, "Table should not exist after the full pgtest rollback")
+	tableName := postgres.QuoteQualifiedName(schema, "pgrollback_rollback_protection")
+	createTableWithValueColumn(t, pgrollbackDB, tableName)
+	insertOneRow(t, pgrollbackDB, tableName, "test_value", "insert row before testing ROLLBACK protection")
+	assertTableRowCount(t, pgrollbackDB, tableName, 1, "")
+	execRollback(t, pgrollbackDB)
+	assertTableRowCount(t, pgrollbackDB, tableName, 1, "Data still exists after ROLLBACK attempt")
+	execPgRollbackRollback(t, pgrollbackDB)
+	assertTableDoesNotExist(t, pgrollbackDB, tableName, "Table should not exist after the full pgrollback rollback")
 }
 
 func TestTransactionSharing(t *testing.T) {
 	testID := "test_sharing"
-	pgtestProxyDSN := getPGTestProxyDSN(testID)
-	pgtestDB1, err := sql.Open("pgx", pgtestProxyDSN)
+	pgrollbackProxyDSN := getPgRollbackProxyDSN(testID)
+	pgrollbackDB1, err := sql.Open("pgx", pgrollbackProxyDSN)
 	if err != nil {
-		t.Fatalf("Failed to connect to PGTest proxy: %v", err)
+		t.Fatalf("Failed to connect to PgRollback proxy: %v", err)
 	}
-	defer pgtestDB1.Close()
-	pgtestDB2, err := sql.Open("pgx", pgtestProxyDSN)
+	defer pgrollbackDB1.Close()
+	pgrollbackDB2, err := sql.Open("pgx", pgrollbackProxyDSN)
 	if err != nil {
-		t.Fatalf("Failed to connect to PGTest proxy: %v", err)
+		t.Fatalf("Failed to connect to PgRollback proxy: %v", err)
 	}
-	defer pgtestDB2.Close()
+	defer pgrollbackDB2.Close()
 	schema := getTestSchema()
-	tableName := postgres.QuoteQualifiedName(schema, "pgtest_sharing")
-	createTableWithValueColumn(t, pgtestDB1, tableName)
-	insertOneRow(t, pgtestDB1, tableName, "from_pgtestDB1", "insert row from first connection to test transaction sharing")
-	assertTableRowCount(t, pgtestDB2, tableName, 1, "Transaction is shared between connections")
-	execPgtestRollback(t, pgtestDB1)
-	assertTableDoesNotExist(t, pgtestDB1, tableName, "Table should not exist on second connection")
-	assertTableDoesNotExist(t, pgtestDB2, tableName, "Table should not exist on second connection")
+	tableName := postgres.QuoteQualifiedName(schema, "pgrollback_sharing")
+	createTableWithValueColumn(t, pgrollbackDB1, tableName)
+	insertOneRow(t, pgrollbackDB1, tableName, "from_pgrollbackDB1", "insert row from first connection to test transaction sharing")
+	assertTableRowCount(t, pgrollbackDB2, tableName, 1, "Transaction is shared between connections")
+	execPgRollbackRollback(t, pgrollbackDB1)
+	assertTableDoesNotExist(t, pgrollbackDB1, tableName, "Table should not exist on second connection")
+	assertTableDoesNotExist(t, pgrollbackDB2, tableName, "Table should not exist on second connection")
 }
 
 func TestIsolationBetweenTestIDs(t *testing.T) {
 	testID1 := "test_isolation_1"
 	testID2 := "test_isolation_2"
-	pgtestProxyDSN1 := getPGTestProxyDSN(testID1)
-	pgtestProxyDSN2 := getPGTestProxyDSN(testID2)
+	pgrollbackProxyDSN1 := getPgRollbackProxyDSN(testID1)
+	pgrollbackProxyDSN2 := getPgRollbackProxyDSN(testID2)
 
-	pgtestDB1, err := sql.Open("pgx", pgtestProxyDSN1)
+	pgrollbackDB1, err := sql.Open("pgx", pgrollbackProxyDSN1)
 	if err != nil {
-		t.Fatalf("Failed to connect to PGTest proxy: %v", err)
+		t.Fatalf("Failed to connect to PgRollback proxy: %v", err)
 	}
-	defer pgtestDB1.Close()
+	defer pgrollbackDB1.Close()
 
-	pgtestDB2, err := sql.Open("pgx", pgtestProxyDSN2)
+	pgrollbackDB2, err := sql.Open("pgx", pgrollbackProxyDSN2)
 	if err != nil {
-		t.Fatalf("Failed to connect to PGTest proxy: %v", err)
+		t.Fatalf("Failed to connect to PgRollback proxy: %v", err)
 	}
-	defer pgtestDB2.Close()
+	defer pgrollbackDB2.Close()
 
 	schema := getTestSchema()
-	tableName := postgres.QuoteQualifiedName(schema, "pgtest_isolation")
-	createTableWithValueColumn(t, pgtestDB1, tableName)
-	insertOneRow(t, pgtestDB1, tableName, "from_test1", "insert row in testID1 to verify isolation between testIDs")
-	assertTableDoesNotExist(t, pgtestDB2, tableName, "Table should not exist on second connection")
+	tableName := postgres.QuoteQualifiedName(schema, "pgrollback_isolation")
+	createTableWithValueColumn(t, pgrollbackDB1, tableName)
+	insertOneRow(t, pgrollbackDB1, tableName, "from_test1", "insert row in testID1 to verify isolation between testIDs")
+	assertTableDoesNotExist(t, pgrollbackDB2, tableName, "Table should not exist on second connection")
 
-	execPgtestRollback(t, pgtestDB1)
-	execPgtestRollback(t, pgtestDB2)
+	execPgRollbackRollback(t, pgrollbackDB1)
+	execPgRollbackRollback(t, pgrollbackDB2)
 
-	assertTableDoesNotExist(t, pgtestDB1, tableName, "Table should not exist on first connection")
-	assertTableDoesNotExist(t, pgtestDB2, tableName, "Table should not exist on second connection")
+	assertTableDoesNotExist(t, pgrollbackDB1, tableName, "Table should not exist on first connection")
+	assertTableDoesNotExist(t, pgrollbackDB2, tableName, "Table should not exist on second connection")
 }
 
 func TestBeginToSavepointConversion(t *testing.T) {
 	testID := "test_savepoint"
-	pgtestProxyDSN := getPGTestProxyDSN(testID)
+	pgrollbackProxyDSN := getPgRollbackProxyDSN(testID)
 
-	pgtestDB, err := sql.Open("pgx", pgtestProxyDSN)
+	pgrollbackDB, err := sql.Open("pgx", pgrollbackProxyDSN)
 	if err != nil {
-		t.Fatalf("Failed to connect to PGTest proxy: %v", err)
+		t.Fatalf("Failed to connect to PgRollback proxy: %v", err)
 	}
-	defer pgtestDB.Close()
+	defer pgrollbackDB.Close()
 
 	schema := getTestSchema()
-	tableName := postgres.QuoteQualifiedName(schema, "pgtest_savepoint")
-	createTableWithValueColumn(t, pgtestDB, tableName)
+	tableName := postgres.QuoteQualifiedName(schema, "pgrollback_savepoint")
+	createTableWithValueColumn(t, pgrollbackDB, tableName)
 
-	insertOneRow(t, pgtestDB, tableName, "before_begin", "insert row before BEGIN to test savepoint conversion")
+	insertOneRow(t, pgrollbackDB, tableName, "before_begin", "insert row before BEGIN to test savepoint conversion")
 
-	execBegin(t, pgtestDB, "")
+	execBegin(t, pgrollbackDB, "")
 
-	insertOneRow(t, pgtestDB, tableName, "after_begin", "insert row after BEGIN (savepoint) to test savepoint conversion")
+	insertOneRow(t, pgrollbackDB, tableName, "after_begin", "insert row after BEGIN (savepoint) to test savepoint conversion")
 
-	execCommit(t, pgtestDB)
+	execCommit(t, pgrollbackDB)
 
-	assertTableRowCount(t, pgtestDB, tableName, 2, "")
+	assertTableRowCount(t, pgrollbackDB, tableName, 2, "")
 
-	execPgtestRollback(t, pgtestDB)
+	execPgRollbackRollback(t, pgrollbackDB)
 }
 
-func TestPGTestCommands(t *testing.T) {
+func TestPgRollbackCommands(t *testing.T) {
 	testID := "test_commands"
-	pgtestProxyDSN := getPGTestProxyDSN(testID)
+	pgrollbackProxyDSN := getPgRollbackProxyDSN(testID)
 
-	pgtestDB, err := sql.Open("pgx", pgtestProxyDSN)
+	pgrollbackDB, err := sql.Open("pgx", pgrollbackProxyDSN)
 	if err != nil {
-		t.Fatalf("Failed to connect to PGTest proxy: %v", err)
+		t.Fatalf("Failed to connect to PgRollback proxy: %v", err)
 	}
-	defer pgtestDB.Close()
+	defer pgrollbackDB.Close()
 
 	// O testID já está na connection string (application_name), então não precisa passar como parâmetro
-	_, err = pgtestDB.Exec("pgtest begin")
+	_, err = pgrollbackDB.Exec("pgrollback begin")
 	if err != nil {
-		t.Logf("pgtest begin: %v", err)
+		t.Logf("pgrollback begin: %v", err)
 	}
 
 	var testIDCol string
@@ -257,9 +257,9 @@ func TestPGTestCommands(t *testing.T) {
 	var createdAt string
 
 	// O testID já está na connection string (application_name), então não precisa passar como parâmetro
-	err = pgtestDB.QueryRow("pgtest status").Scan(&testIDCol, &active, &level, &createdAt)
+	err = pgrollbackDB.QueryRow("pgrollback status").Scan(&testIDCol, &active, &level, &createdAt)
 	if err != nil {
-		t.Logf("pgtest status: %v", err)
+		t.Logf("pgrollback status: %v", err)
 	} else {
 		if testIDCol != testID {
 			t.Errorf("Status test_id = %v, want %v", testIDCol, testID)
@@ -269,43 +269,43 @@ func TestPGTestCommands(t *testing.T) {
 		}
 	}
 
-	execPgtestRollback(t, pgtestDB)
+	execPgRollbackRollback(t, pgrollbackDB)
 }
 
 func TestTransactionPersistenceAcrossReconnections(t *testing.T) {
 	testID := "test_reconnection_persistence"
 
 	// Primeira conexão - cria tabela e insere dados
-	pgtestDB1 := connectToPGTestProxy(t, testID)
+	pgrollbackDB1 := connectToPgRollbackProxy(t, testID)
 
 	schema := getTestSchema()
-	tableName := postgres.QuoteQualifiedName(schema, "pgtest_reconnection")
-	createTableWithValueColumn(t, pgtestDB1, tableName)
+	tableName := postgres.QuoteQualifiedName(schema, "pgrollback_reconnection")
+	createTableWithValueColumn(t, pgrollbackDB1, tableName)
 
-	insertOneRow(t, pgtestDB1, tableName, "created_in_first_connection", "insert row in first connection to test transaction persistence across reconnections")
+	insertOneRow(t, pgrollbackDB1, tableName, "created_in_first_connection", "insert row in first connection to test transaction persistence across reconnections")
 
 	// Verifica que os dados estão visíveis na primeira conexão
-	assertTableRowCount(t, pgtestDB1, tableName, 1, "")
+	assertTableRowCount(t, pgrollbackDB1, tableName, 1, "")
 
 	// Fecha a primeira conexão
-	pgtestDB1.Close()
+	pgrollbackDB1.Close()
 	t.Log("First connection closed")
 
 	// Reconecta com o mesmo testID
-	pgtestDB2 := connectToPGTestProxy(t, testID)
-	defer pgtestDB2.Close()
+	pgrollbackDB2 := connectToPgRollbackProxy(t, testID)
+	defer pgrollbackDB2.Close()
 
 	// Verifica que os dados criados na primeira conexão ainda estão visíveis
-	assertTableRowCount(t, pgtestDB2, tableName, 1, "Data persisted across reconnection")
+	assertTableRowCount(t, pgrollbackDB2, tableName, 1, "Data persisted across reconnection")
 
 	// Insere mais dados na segunda conexão
-	insertOneRow(t, pgtestDB2, tableName, "created_in_second_connection", "insert row in second connection to verify shared transaction")
+	insertOneRow(t, pgrollbackDB2, tableName, "created_in_second_connection", "insert row in second connection to verify shared transaction")
 
 	// Verifica que agora temos 2 linhas
-	assertTableRowCount(t, pgtestDB2, tableName, 2, "Both connections share the same transaction")
+	assertTableRowCount(t, pgrollbackDB2, tableName, 2, "Both connections share the same transaction")
 
 	// Limpa a transação
-	execPgtestRollback(t, pgtestDB2)
+	execPgRollbackRollback(t, pgrollbackDB2)
 }
 
 // TestConcurrentConnectionsSameSession runs multiple connections (same testID) that each execute
@@ -314,7 +314,7 @@ func TestTransactionPersistenceAcrossReconnections(t *testing.T) {
 // Uses prepared statements so all use the Extended Query path (Parse + Execute).
 func TestConcurrentConnectionsSameSession(t *testing.T) {
 	testID := "test_concurrent_same_session"
-	dsn := getPGTestProxyDSN(testID)
+	dsn := getPgRollbackProxyDSN(testID)
 	const numConcurrentConnections = 10
 
 	dbs := make([]*sql.DB, numConcurrentConnections)
@@ -373,7 +373,7 @@ func TestConcurrentConnectionsSameSession(t *testing.T) {
 // but prepared statement requires M" when the first connection executed.
 func TestTwoConnectionsSamePreparedStatementName(t *testing.T) {
 	testID := "test_same_stmt_name"
-	dsn := getPGTestProxyDSN(testID)
+	dsn := getPgRollbackProxyDSN(testID)
 	ctx := context.Background()
 
 	conn1, err := pgconn.Connect(ctx, dsn)
@@ -437,7 +437,7 @@ func TestTwoConnectionsSamePreparedStatementName(t *testing.T) {
 // does not exist, so the backend returns an error. conn1's statement must still work.
 func TestIntegrationDEALLOCATEOnlyAffectsOwnConnection(t *testing.T) {
 	testID := "test_dealloc_own_only"
-	dsn := getPGTestProxyDSN(testID)
+	dsn := getPgRollbackProxyDSN(testID)
 	ctx := context.Background()
 
 	conn1, err := pgconn.Connect(ctx, dsn)
@@ -492,7 +492,7 @@ func TestIntegrationDEALLOCATEOnlyAffectsOwnConnection(t *testing.T) {
 // must still be able to use its statement, then conn2 runs DEALLOCATE <name> and succeeds.
 func TestIntegrationDEALLOCATEALLWithSameNameOnTwoConnections(t *testing.T) {
 	testID := "test_dealloc_all_same_name"
-	dsn := getPGTestProxyDSN(testID)
+	dsn := getPgRollbackProxyDSN(testID)
 	ctx := context.Background()
 
 	conn1, err := pgconn.Connect(ctx, dsn)
@@ -551,7 +551,7 @@ func TestIntegrationDEALLOCATEALLWithSameNameOnTwoConnections(t *testing.T) {
 // a single row with val = 2, not 1.
 func TestMultipleQueriesReturnsLastOnly(t *testing.T) {
 	testID := "test_multi_last_only"
-	db := connectToPGTestProxySingleConn(t, testID)
+	db := connectToPgRollbackProxySingleConn(t, testID)
 	defer db.Close()
 
 	execBegin(t, db, "")
@@ -583,15 +583,15 @@ func TestMultipleQueriesReturnsLastOnly(t *testing.T) {
 // one row with value 0 or 1 (table existence), not the ping response.
 func TestResetSessionPingBeforeQuery(t *testing.T) {
 	testID := "test_reset_session_ping"
-	db := connectToPGTestProxySingleConn(t, testID)
+	db := connectToPgRollbackProxySingleConn(t, testID)
 	defer db.Close()
 
 	schema := getTestSchema()
-	tableName := postgres.QuoteQualifiedName(schema, "pgtest_nonexistent_for_repro")
+	tableName := postgres.QuoteQualifiedName(schema, "pgrollback_nonexistent_for_repro")
 	// Table is never created; we expect existence = 0.
 	query := fmt.Sprintf("SELECT CASE WHEN to_regclass('%s') IS NOT NULL THEN 1 ELSE 0 END", tableName)
 
-	execPgTestFullRollback(t, db)
+	execPgRollbackFullRollback(t, db)
 	// Immediately after full rollback: next use of db will do ResetSession (Ping) then our query.
 	rows, err := db.Query(query)
 	if err != nil {
@@ -616,226 +616,226 @@ func TestResetSessionPingBeforeQuery(t *testing.T) {
 }
 
 func transactionHandlingTableName() string {
-	return postgres.QuoteQualifiedName(getTestSchema(), "pgtest_transaction_test")
+	return postgres.QuoteQualifiedName(getTestSchema(), "pgrollback_transaction_test")
 }
 
 func TestTransactionHandling_InsertRowAndRollback(t *testing.T) {
 	testID := "test_txn_insert_rollback"
-	pgtestDB := connectToPGTestProxy(t, testID)
-	defer pgtestDB.Close()
+	pgrollbackDB := connectToPgRollbackProxy(t, testID)
+	defer pgrollbackDB.Close()
 	tableName := transactionHandlingTableName()
 
-	assertTableDoesNotExist(t, pgtestDB, tableName, "Table should not exist before test")
-	createTableWithValueColumn(t, pgtestDB, tableName)
-	execBegin(t, pgtestDB, "")
-	insertOneRow(t, pgtestDB, tableName, "alice", "insert row in basic BEGIN/COMMIT test")
-	assertTableRowCount(t, pgtestDB, tableName, 1, "Basic BEGIN/COMMIT works correctly")
-	execRollbackOrFail(t, pgtestDB)
-	assertTableRowCount(t, pgtestDB, tableName, 0, "Basic BEGIN/COMMIT works correctly")
-	execPgTestFullRollback(t, pgtestDB)
-	pingWithTimeout(t, pgtestDB, 5*time.Second, false, "Table should not exist after pgtest rollback")
-	assertTableDoesNotExist(t, pgtestDB, tableName, "Table should not exist after pgtest rollback")
+	assertTableDoesNotExist(t, pgrollbackDB, tableName, "Table should not exist before test")
+	createTableWithValueColumn(t, pgrollbackDB, tableName)
+	execBegin(t, pgrollbackDB, "")
+	insertOneRow(t, pgrollbackDB, tableName, "alice", "insert row in basic BEGIN/COMMIT test")
+	assertTableRowCount(t, pgrollbackDB, tableName, 1, "Basic BEGIN/COMMIT works correctly")
+	execRollbackOrFail(t, pgrollbackDB)
+	assertTableRowCount(t, pgrollbackDB, tableName, 0, "Basic BEGIN/COMMIT works correctly")
+	execPgRollbackFullRollback(t, pgrollbackDB)
+	pingWithTimeout(t, pgrollbackDB, 5*time.Second, false, "Table should not exist after pgrollback rollback")
+	assertTableDoesNotExist(t, pgrollbackDB, tableName, "Table should not exist after pgrollback rollback")
 	t.Log("SUCCESS: insert_row_and_rollback correctly")
 }
 
 func TestTransactionHandling_ExplicitSavepoint(t *testing.T) {
 	testID := "test_txn_explicit_savepoint"
-	pgtestDB := connectToPGTestProxy(t, testID)
-	defer pgtestDB.Close()
+	pgrollbackDB := connectToPgRollbackProxy(t, testID)
+	defer pgrollbackDB.Close()
 	tableName := transactionHandlingTableName()
 
-	createTableWithValueColumn(t, pgtestDB, tableName)
-	execBegin(t, pgtestDB, "")
-	insertOneRow(t, pgtestDB, tableName, "charlie", "insert row before explicit savepoint test")
-	assertTableRowCount(t, pgtestDB, tableName, 1, "Rollback must return the row quantity to 1")
-	execSavepoint(t, pgtestDB, "pgtsp1")
-	assertTableRowCount(t, pgtestDB, tableName, 1, "Rollback must return the row quantity to 1")
-	insertOneRow(t, pgtestDB, tableName, "david", "insert row after explicit savepoint to test rollback to savepoint")
-	assertTableRowCount(t, pgtestDB, tableName, 2, "Inserted row works correctly")
-	execRollbackToSavepoint(t, pgtestDB, "pgtsp1")
-	assertTableRowCount(t, pgtestDB, tableName, 1, "Rollback must return the row quantity to 1")
-	execPgTestFullRollback(t, pgtestDB)
+	createTableWithValueColumn(t, pgrollbackDB, tableName)
+	execBegin(t, pgrollbackDB, "")
+	insertOneRow(t, pgrollbackDB, tableName, "charlie", "insert row before explicit savepoint test")
+	assertTableRowCount(t, pgrollbackDB, tableName, 1, "Rollback must return the row quantity to 1")
+	execSavepoint(t, pgrollbackDB, "pgtsp1")
+	assertTableRowCount(t, pgrollbackDB, tableName, 1, "Rollback must return the row quantity to 1")
+	insertOneRow(t, pgrollbackDB, tableName, "david", "insert row after explicit savepoint to test rollback to savepoint")
+	assertTableRowCount(t, pgrollbackDB, tableName, 2, "Inserted row works correctly")
+	execRollbackToSavepoint(t, pgrollbackDB, "pgtsp1")
+	assertTableRowCount(t, pgrollbackDB, tableName, 1, "Rollback must return the row quantity to 1")
+	execPgRollbackFullRollback(t, pgrollbackDB)
 	t.Log("SUCCESS: Explicit savepoint works correctly")
 }
 
 func TestTransactionHandling_NestedSavepoints(t *testing.T) {
 	testID := "test_txn_nested_savepoints"
-	pgtestDB := connectToPGTestProxy(t, testID)
-	defer pgtestDB.Close()
+	pgrollbackDB := connectToPgRollbackProxy(t, testID)
+	defer pgrollbackDB.Close()
 	tableName := transactionHandlingTableName()
 
-	createTableWithValueColumn(t, pgtestDB, tableName)
-	execBegin(t, pgtestDB, "")
-	insertOneRow(t, pgtestDB, tableName, "nested_1", "insert first row in nested savepoints test")
-	execSavepoint(t, pgtestDB, "a")
-	insertOneRow(t, pgtestDB, tableName, "nested_2", "insert second row after first savepoint in nested savepoints test")
-	execSavepoint(t, pgtestDB, "b")
-	insertOneRow(t, pgtestDB, tableName, "nested_3", "insert third row after second savepoint in nested savepoints test")
-	execRollbackToSavepoint(t, pgtestDB, "b")
-	execRollbackToSavepoint(t, pgtestDB, "b")
-	assertTableRowCount(t, pgtestDB, tableName, 2, "Rollback to b must return the row quantity to 2")
-	assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value IN ('nested_1', 'nested_2')", tableName), 2, "Nested SAVEPOINTs work correctly")
-	execCommit(t, pgtestDB)
-	assertTableRowCount(t, pgtestDB, tableName, 2, "Rollback to b must return the row quantity to 2")
-	execRollbackToInvalidSavepoint(t, pgtestDB, "b")
-	assertTableRowCount(t, pgtestDB, tableName, 2, "Rollback to b must return the row quantity to 2")
-	execRollbackToInvalidSavepoint(t, pgtestDB, "a")
-	assertTableRowCount(t, pgtestDB, tableName, 2, "Rollback to b must return the row quantity to 2")
-	execPgTestFullRollback(t, pgtestDB)
+	createTableWithValueColumn(t, pgrollbackDB, tableName)
+	execBegin(t, pgrollbackDB, "")
+	insertOneRow(t, pgrollbackDB, tableName, "nested_1", "insert first row in nested savepoints test")
+	execSavepoint(t, pgrollbackDB, "a")
+	insertOneRow(t, pgrollbackDB, tableName, "nested_2", "insert second row after first savepoint in nested savepoints test")
+	execSavepoint(t, pgrollbackDB, "b")
+	insertOneRow(t, pgrollbackDB, tableName, "nested_3", "insert third row after second savepoint in nested savepoints test")
+	execRollbackToSavepoint(t, pgrollbackDB, "b")
+	execRollbackToSavepoint(t, pgrollbackDB, "b")
+	assertTableRowCount(t, pgrollbackDB, tableName, 2, "Rollback to b must return the row quantity to 2")
+	assertQueryCount(t, pgrollbackDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value IN ('nested_1', 'nested_2')", tableName), 2, "Nested SAVEPOINTs work correctly")
+	execCommit(t, pgrollbackDB)
+	assertTableRowCount(t, pgrollbackDB, tableName, 2, "Rollback to b must return the row quantity to 2")
+	execRollbackToInvalidSavepoint(t, pgrollbackDB, "b")
+	assertTableRowCount(t, pgrollbackDB, tableName, 2, "Rollback to b must return the row quantity to 2")
+	execRollbackToInvalidSavepoint(t, pgrollbackDB, "a")
+	assertTableRowCount(t, pgrollbackDB, tableName, 2, "Rollback to b must return the row quantity to 2")
+	execPgRollbackFullRollback(t, pgrollbackDB)
 	t.Log("SUCCESS: Nested savepoints works correctly")
 }
 
 func TestTransactionHandling_NestedSavepointsReleaseThenRollbackToA(t *testing.T) {
 	testID := "test_txn_nested_release_rollback_a"
-	pgtestDB := connectToPGTestProxy(t, testID)
-	defer pgtestDB.Close()
+	pgrollbackDB := connectToPgRollbackProxy(t, testID)
+	defer pgrollbackDB.Close()
 	tableName := transactionHandlingTableName()
 
-	createTableWithValueColumn(t, pgtestDB, tableName)
-	execBegin(t, pgtestDB, "")
-	insertOneRow(t, pgtestDB, tableName, "nested_1", "insert first row")
-	execSavepoint(t, pgtestDB, "a")
-	insertOneRow(t, pgtestDB, tableName, "nested_2", "insert second row after savepoint a")
-	execSavepoint(t, pgtestDB, "b")
-	insertOneRow(t, pgtestDB, tableName, "nested_3", "insert third row after savepoint b")
-	execRollbackToSavepoint(t, pgtestDB, "b")
-	execRollbackToSavepoint(t, pgtestDB, "b")
-	assertTableRowCount(t, pgtestDB, tableName, 2, "After rollback to b twice we have 2 rows")
-	execReleaseSavepoint(t, pgtestDB, "b")
-	assertTableRowCount(t, pgtestDB, tableName, 2, "After RELEASE SAVEPOINT b we still have 2 rows")
-	execRollbackToSavepoint(t, pgtestDB, "a")
-	assertTableRowCount(t, pgtestDB, tableName, 1, "After ROLLBACK TO SAVEPOINT a we have 1 row")
-	execPgTestFullRollback(t, pgtestDB)
+	createTableWithValueColumn(t, pgrollbackDB, tableName)
+	execBegin(t, pgrollbackDB, "")
+	insertOneRow(t, pgrollbackDB, tableName, "nested_1", "insert first row")
+	execSavepoint(t, pgrollbackDB, "a")
+	insertOneRow(t, pgrollbackDB, tableName, "nested_2", "insert second row after savepoint a")
+	execSavepoint(t, pgrollbackDB, "b")
+	insertOneRow(t, pgrollbackDB, tableName, "nested_3", "insert third row after savepoint b")
+	execRollbackToSavepoint(t, pgrollbackDB, "b")
+	execRollbackToSavepoint(t, pgrollbackDB, "b")
+	assertTableRowCount(t, pgrollbackDB, tableName, 2, "After rollback to b twice we have 2 rows")
+	execReleaseSavepoint(t, pgrollbackDB, "b")
+	assertTableRowCount(t, pgrollbackDB, tableName, 2, "After RELEASE SAVEPOINT b we still have 2 rows")
+	execRollbackToSavepoint(t, pgrollbackDB, "a")
+	assertTableRowCount(t, pgrollbackDB, tableName, 1, "After ROLLBACK TO SAVEPOINT a we have 1 row")
+	execPgRollbackFullRollback(t, pgrollbackDB)
 	t.Log("SUCCESS: RELEASE SAVEPOINT b then ROLLBACK TO SAVEPOINT a works correctly")
 }
 
 func TestTransactionHandling_ReleaseSavepoint(t *testing.T) {
 	testID := "test_txn_release_savepoint"
-	pgtestDB := connectToPGTestProxy(t, testID)
-	defer pgtestDB.Close()
+	pgrollbackDB := connectToPgRollbackProxy(t, testID)
+	defer pgrollbackDB.Close()
 	tableName := transactionHandlingTableName()
 
-	createTableWithValueColumn(t, pgtestDB, tableName)
-	execBegin(t, pgtestDB, "")
-	insertOneRow(t, pgtestDB, tableName, "release_test", "insert row before RELEASE SAVEPOINT test")
-	execSavepoint(t, pgtestDB, "sp_release")
-	execReleaseSavepoint(t, pgtestDB, "sp_release")
-	assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'release_test'", tableName), 1, "RELEASE SAVEPOINT works correctly")
-	execReleaseSavepointExpectError(t, pgtestDB, "sp_release")
-	assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'release_test'", tableName), 1, "State unchanged after invalid RELEASE")
-	execCommit(t, pgtestDB)
-	execPgTestFullRollback(t, pgtestDB)
+	createTableWithValueColumn(t, pgrollbackDB, tableName)
+	execBegin(t, pgrollbackDB, "")
+	insertOneRow(t, pgrollbackDB, tableName, "release_test", "insert row before RELEASE SAVEPOINT test")
+	execSavepoint(t, pgrollbackDB, "sp_release")
+	execReleaseSavepoint(t, pgrollbackDB, "sp_release")
+	assertQueryCount(t, pgrollbackDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'release_test'", tableName), 1, "RELEASE SAVEPOINT works correctly")
+	execReleaseSavepointExpectError(t, pgrollbackDB, "sp_release")
+	assertQueryCount(t, pgrollbackDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'release_test'", tableName), 1, "State unchanged after invalid RELEASE")
+	execCommit(t, pgrollbackDB)
+	execPgRollbackFullRollback(t, pgrollbackDB)
 	t.Log("SUCCESS: Release savepoint works correctly")
 }
 
 func TestTransactionHandling_NestedBeginCommit(t *testing.T) {
 	testID := "test_txn_nested_begin_commit"
-	pgtestDB := connectToPGTestProxy(t, testID)
-	defer pgtestDB.Close()
+	pgrollbackDB := connectToPgRollbackProxy(t, testID)
+	defer pgrollbackDB.Close()
 	tableName := transactionHandlingTableName()
 
-	createTableWithValueColumn(t, pgtestDB, tableName)
-	execBegin(t, pgtestDB, "")
-	insertOneRow(t, pgtestDB, tableName, "nested_begin_1", "insert first row in nested BEGIN/COMMIT test")
-	execBegin(t, pgtestDB, "")
-	insertOneRow(t, pgtestDB, tableName, "nested_begin_2", "insert second row after second BEGIN in nested BEGIN/COMMIT test")
-	execCommit(t, pgtestDB)
-	assertTableRowCount(t, pgtestDB, tableName, 2, "Commit keep the 2 rows")
-	execCommit(t, pgtestDB)
-	assertTableRowCount(t, pgtestDB, tableName, 2, "Commit keep the 2 rows")
-	execPgTestFullRollback(t, pgtestDB)
+	createTableWithValueColumn(t, pgrollbackDB, tableName)
+	execBegin(t, pgrollbackDB, "")
+	insertOneRow(t, pgrollbackDB, tableName, "nested_begin_1", "insert first row in nested BEGIN/COMMIT test")
+	execBegin(t, pgrollbackDB, "")
+	insertOneRow(t, pgrollbackDB, tableName, "nested_begin_2", "insert second row after second BEGIN in nested BEGIN/COMMIT test")
+	execCommit(t, pgrollbackDB)
+	assertTableRowCount(t, pgrollbackDB, tableName, 2, "Commit keep the 2 rows")
+	execCommit(t, pgrollbackDB)
+	assertTableRowCount(t, pgrollbackDB, tableName, 2, "Commit keep the 2 rows")
+	execPgRollbackFullRollback(t, pgrollbackDB)
 	t.Log("SUCCESS: Nested BEGIN/COMMIT works correctly")
 }
 
 func TestTransactionHandling_ErrorHandlingAbortedTransaction(t *testing.T) {
 	testID := "test_txn_error_handling"
-	pgtestDB := connectToPGTestProxy(t, testID)
-	defer pgtestDB.Close()
+	pgrollbackDB := connectToPgRollbackProxy(t, testID)
+	defer pgrollbackDB.Close()
 	tableName := transactionHandlingTableName()
 
-	dropTableIfExists(t, pgtestDB, tableName)
-	createTableWithValueColumn(t, pgtestDB, tableName)
-	execBegin(t, pgtestDB, "")
-	insertOneRow(t, pgtestDB, tableName, "before_error", "insert valid row before testing error handling")
-	insertDuplicateRow(t, pgtestDB, tableName, 1, "duplicate")
-	execRollbackOrFail(t, pgtestDB)
-	assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'before_error'", tableName), 0, "ROLLBACK after error correctly reverted all changes")
-	execPgTestFullRollback(t, pgtestDB)
-	assertTableDoesNotExist(t, pgtestDB, tableName, "Table does not exist after pgtest rollback")
+	dropTableIfExists(t, pgrollbackDB, tableName)
+	createTableWithValueColumn(t, pgrollbackDB, tableName)
+	execBegin(t, pgrollbackDB, "")
+	insertOneRow(t, pgrollbackDB, tableName, "before_error", "insert valid row before testing error handling")
+	insertDuplicateRow(t, pgrollbackDB, tableName, 1, "duplicate")
+	execRollbackOrFail(t, pgrollbackDB)
+	assertQueryCount(t, pgrollbackDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'before_error'", tableName), 0, "ROLLBACK after error correctly reverted all changes")
+	execPgRollbackFullRollback(t, pgrollbackDB)
+	assertTableDoesNotExist(t, pgrollbackDB, tableName, "Table does not exist after pgrollback rollback")
 }
 
 func TestInvalidStatements(t *testing.T) {
 	testID := "test_invalid_statements"
-	pgtestProxyDSN := getPGTestProxyDSN(testID)
+	pgrollbackProxyDSN := getPgRollbackProxyDSN(testID)
 
-	pgtestDB, err := sql.Open("pgx", pgtestProxyDSN)
+	pgrollbackDB, err := sql.Open("pgx", pgrollbackProxyDSN)
 	if err != nil {
-		t.Fatalf("Failed to connect to PGTest proxy: %v", err)
+		t.Fatalf("Failed to connect to PgRollback proxy: %v", err)
 	}
-	defer pgtestDB.Close()
+	defer pgrollbackDB.Close()
 
 	schema := getTestSchema()
 	nonExistTableName := postgres.QuoteQualifiedName(schema, "nonexistent_table")
 
-	assertTableDoesNotExist(t, pgtestDB, nonExistTableName, "Table does not exist after pgtest rollback")
+	assertTableDoesNotExist(t, pgrollbackDB, nonExistTableName, "Table does not exist after pgrollback rollback")
 
 	// Testa query em tabela inexistente
-	_, err = pgtestDB.Exec("SELECT * FROM nonexistent_table")
+	_, err = pgrollbackDB.Exec("SELECT * FROM nonexistent_table")
 	if err == nil {
 		t.Error("Expected error for querying nonexistent table, got nil")
 	} else {
 		errStr := err.Error()
 		if strings.Contains(errStr, "does not exist") || strings.Contains(errStr, "não existe") {
-			t.Logf("SUCCESS: pgtest correctly forwarded error for nonexistent table: %v", err)
+			t.Logf("SUCCESS: pgrollback correctly forwarded error for nonexistent table: %v", err)
 		} else {
 			t.Logf("Note: Received error (may be valid): %v", err)
 		}
 	}
 
-	createTableWithValueColumn(t, pgtestDB, nonExistTableName)
+	createTableWithValueColumn(t, pgrollbackDB, nonExistTableName)
 
 	// Testa query com atributo inexistente
-	_, err = pgtestDB.Exec(fmt.Sprintf("SELECT nonexistent_column FROM %s", nonExistTableName))
+	_, err = pgrollbackDB.Exec(fmt.Sprintf("SELECT nonexistent_column FROM %s", nonExistTableName))
 	if err == nil {
 		t.Error("Expected error for querying nonexistent column, got nil")
 	} else {
 		errStr := err.Error()
 		if strings.Contains(errStr, "does not exist") || strings.Contains(errStr, "não existe") || strings.Contains(errStr, "column") {
-			t.Logf("SUCCESS: pgtest correctly forwarded error for nonexistent column: %v", err)
+			t.Logf("SUCCESS: pgrollback correctly forwarded error for nonexistent column: %v", err)
 		} else {
 			t.Logf("Note: Received error (may be valid): %v", err)
 		}
 	}
 
 	// Testa INSERT com atributo inexistente
-	_, err = pgtestDB.Exec(fmt.Sprintf("INSERT INTO %s (nonexistent_column) VALUES ('test')", nonExistTableName))
+	_, err = pgrollbackDB.Exec(fmt.Sprintf("INSERT INTO %s (nonexistent_column) VALUES ('test')", nonExistTableName))
 	if err == nil {
 		t.Error("Expected error for INSERT with nonexistent column, got nil")
 	} else {
 		errStr := err.Error()
 		if strings.Contains(errStr, "does not exist") || strings.Contains(errStr, "não existe") || strings.Contains(errStr, "column") {
-			t.Logf("SUCCESS: pgtest correctly forwarded error for INSERT with nonexistent column: %v", err)
+			t.Logf("SUCCESS: pgrollback correctly forwarded error for INSERT with nonexistent column: %v", err)
 		} else {
 			t.Logf("Note: Received error (may be valid): %v", err)
 		}
 	}
 
 	// Testa sintaxe SQL inválida
-	_, err = pgtestDB.Exec("SELECT * FROM WHERE invalid_syntax")
+	_, err = pgrollbackDB.Exec("SELECT * FROM WHERE invalid_syntax")
 	if err == nil {
 		t.Error("Expected error for invalid SQL syntax, got nil")
 	} else {
 		errStr := err.Error()
 		if strings.Contains(errStr, "syntax") || strings.Contains(errStr, "sintaxe") || strings.Contains(errStr, "error") {
-			t.Logf("SUCCESS: pgtest correctly forwarded error for invalid SQL syntax: %v", err)
+			t.Logf("SUCCESS: pgrollback correctly forwarded error for invalid SQL syntax: %v", err)
 		} else {
 			t.Logf("Note: Received error (may be valid): %v", err)
 		}
 	}
 
-	pingWithTimeout(t, pgtestDB, 5*time.Second, false, "Connection remains valid after handling invalid statements")
+	pingWithTimeout(t, pgrollbackDB, 5*time.Second, false, "Connection remains valid after handling invalid statements")
 	// Limpa a transação
-	execPgtestRollback(t, pgtestDB)
+	execPgRollbackRollback(t, pgrollbackDB)
 }
 
 // TestIsolatedRollbackPerBegin valida COMMIT/ROLLBACK com regras de um único nível:
@@ -843,128 +843,128 @@ func TestInvalidStatements(t *testing.T) {
 // - Apenas o primeiro COMMIT ou ROLLBACK após BEGIN é "real"; com level 0, COMMIT/ROLLBACK são no-op.
 func TestIsolatedRollbackPerBegin(t *testing.T) {
 	testID := "test_isolated_rollback"
-	pgtestProxyDSN := getPGTestProxyDSN(testID)
+	pgrollbackProxyDSN := getPgRollbackProxyDSN(testID)
 
-	pgtestDB, err := sql.Open("pgx", pgtestProxyDSN)
+	pgrollbackDB, err := sql.Open("pgx", pgrollbackProxyDSN)
 	if err != nil {
-		t.Fatalf("Failed to connect to PGTest proxy: %v", err)
+		t.Fatalf("Failed to connect to PgRollback proxy: %v", err)
 	}
-	defer pgtestDB.Close()
+	defer pgrollbackDB.Close()
 
 	schema := getTestSchema()
-	tableName := postgres.QuoteQualifiedName(schema, "pgtest_isolated_rollback")
+	tableName := postgres.QuoteQualifiedName(schema, "pgrollback_isolated_rollback")
 
-	assertTableDoesNotExist(t, pgtestDB, tableName, "Table should not exist before test")
-	createTableWithValueColumn(t, pgtestDB, tableName)
+	assertTableDoesNotExist(t, pgrollbackDB, tableName, "Table should not exist before test")
+	createTableWithValueColumn(t, pgrollbackDB, tableName)
 
 	// Teste 1: BEGIN → INSERT → BEGIN (no-op) → INSERT → ROLLBACK
 	// Com um único nível, ROLLBACK reverte tudo desde o único savepoint (ambos INSERTs).
 	t.Run("rollback_reverts_only_last_begin", func(t *testing.T) {
-		execBegin(t, pgtestDB, "")
-		insertOneRow(t, pgtestDB, tableName, "first_insert", "insert first value in rollback_reverts_only_last_begin test")
-		execBegin(t, pgtestDB, "") // no-op: single level
-		insertOneRow(t, pgtestDB, tableName, "second_insert", "insert second value in rollback_reverts_only_last_begin test")
+		execBegin(t, pgrollbackDB, "")
+		insertOneRow(t, pgrollbackDB, tableName, "first_insert", "insert first value in rollback_reverts_only_last_begin test")
+		execBegin(t, pgrollbackDB, "") // no-op: single level
+		insertOneRow(t, pgrollbackDB, tableName, "second_insert", "insert second value in rollback_reverts_only_last_begin test")
 
-		execRollbackOrFail(t, pgtestDB)
+		execRollbackOrFail(t, pgrollbackDB)
 
 		// Single level: rollback reverts to the only savepoint, so both inserts are gone.
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'first_insert'", tableName), 0, "First INSERT should be rolled back (single level)")
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'second_insert'", tableName), 0, "Second INSERT should be rolled back")
+		assertQueryCount(t, pgrollbackDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'first_insert'", tableName), 0, "First INSERT should be rolled back (single level)")
+		assertQueryCount(t, pgrollbackDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'second_insert'", tableName), 0, "Second INSERT should be rolled back")
 
-		execCommit(t, pgtestDB) // real: releases the savepoint
+		execCommit(t, pgrollbackDB) // real: releases the savepoint
 		// Second COMMIT/ROLLBACK would be no-op (level 0)
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'first_insert'", tableName), 0, "Still 0 after COMMIT")
+		assertQueryCount(t, pgrollbackDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'first_insert'", tableName), 0, "Still 0 after COMMIT")
 	})
 
 	// Teste 2: BEGIN → INSERT → COMMIT → BEGIN → INSERT → ROLLBACK
 	// O ROLLBACK deve reverter apenas o segundo INSERT (o primeiro já foi commitado)
 	t.Run("rollback_after_commit_only_affects_uncommitted", func(t *testing.T) {
 		// Primeiro BEGIN
-		_, err = pgtestDB.Exec("BEGIN")
+		_, err = pgrollbackDB.Exec("BEGIN")
 		if err != nil {
 			t.Fatalf("Failed to execute first BEGIN: %v", err)
 		}
 
 		// Primeiro INSERT
-		insertOneRow(t, pgtestDB, tableName, "committed_insert", "insert committed value in rollback_after_commit_only_affects_uncommitted test")
+		insertOneRow(t, pgrollbackDB, tableName, "committed_insert", "insert committed value in rollback_after_commit_only_affects_uncommitted test")
 		if err != nil {
 			t.Fatalf("Failed to insert committed value: %v", err)
 		}
 
 		// COMMIT do primeiro BEGIN
-		execCommit(t, pgtestDB)
+		execCommit(t, pgrollbackDB)
 
 		// Segundo BEGIN
-		execBegin(t, pgtestDB, "")
+		execBegin(t, pgrollbackDB, "")
 
 		// Segundo INSERT
-		insertOneRow(t, pgtestDB, tableName, "uncommitted_insert", "insert uncommitted value in rollback_after_commit_only_affects_uncommitted test")
+		insertOneRow(t, pgrollbackDB, tableName, "uncommitted_insert", "insert uncommitted value in rollback_after_commit_only_affects_uncommitted test")
 		if err != nil {
 			t.Fatalf("Failed to insert uncommitted value: %v", err)
 		}
 
 		// ROLLBACK deve reverter apenas o segundo INSERT
-		execRollbackOrFail(t, pgtestDB)
+		execRollbackOrFail(t, pgrollbackDB)
 
 		// Verifica que o primeiro INSERT (commitado) ainda existe
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'committed_insert'", tableName), 1, "Committed INSERT should still exist")
+		assertQueryCount(t, pgrollbackDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'committed_insert'", tableName), 1, "Committed INSERT should still exist")
 		// Verifica que o segundo INSERT foi revertido
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'uncommitted_insert'", tableName), 0, "Uncommitted INSERT should be rolled back")
+		assertQueryCount(t, pgrollbackDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'uncommitted_insert'", tableName), 0, "Uncommitted INSERT should be rolled back")
 	})
 
 	// Teste 3: Um único nível — BEGIN → INSERTs → ROLLBACK reverte tudo desde o savepoint
 	// Segundo BEGIN é no-op; segundo ROLLBACK é no-op (level 0).
 	t.Run("nested_begin_rollback_levels", func(t *testing.T) {
-		execBegin(t, pgtestDB, "")
-		insertOneRow(t, pgtestDB, tableName, "level1", "insert level 1")
-		execBegin(t, pgtestDB, "") // no-op
-		insertOneRow(t, pgtestDB, tableName, "level2", "insert level 2")
-		_, err = pgtestDB.Exec("BEGIN")
+		execBegin(t, pgrollbackDB, "")
+		insertOneRow(t, pgrollbackDB, tableName, "level1", "insert level 1")
+		execBegin(t, pgrollbackDB, "") // no-op
+		insertOneRow(t, pgrollbackDB, tableName, "level2", "insert level 2")
+		_, err = pgrollbackDB.Exec("BEGIN")
 		if err != nil {
 			t.Fatalf("Failed to execute BEGIN: %v", err)
 		}
-		insertOneRow(t, pgtestDB, tableName, "level3", "insert level 3")
+		insertOneRow(t, pgrollbackDB, tableName, "level3", "insert level 3")
 
-		execRollbackOrFail(t, pgtestDB) // real: reverts to only savepoint, so level1/2/3 all gone
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'level3'", tableName), 0, "Level 3 should be rolled back")
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'level2'", tableName), 0, "Level 2 should be rolled back (single level)")
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'level1'", tableName), 0, "Level 1 should be rolled back (single level)")
+		execRollbackOrFail(t, pgrollbackDB) // real: reverts to only savepoint, so level1/2/3 all gone
+		assertQueryCount(t, pgrollbackDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'level3'", tableName), 0, "Level 3 should be rolled back")
+		assertQueryCount(t, pgrollbackDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'level2'", tableName), 0, "Level 2 should be rolled back (single level)")
+		assertQueryCount(t, pgrollbackDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'level1'", tableName), 0, "Level 1 should be rolled back (single level)")
 
-		execRollbackOrFail(t, pgtestDB) // no-op (level 0)
-		execCommit(t, pgtestDB)         // real
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'level1'", tableName), 0, "Level 1 still 0 after COMMIT")
+		execRollbackOrFail(t, pgrollbackDB) // no-op (level 0)
+		execCommit(t, pgrollbackDB)         // real
+		assertQueryCount(t, pgrollbackDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'level1'", tableName), 0, "Level 1 still 0 after COMMIT")
 	})
 
 	// Teste 4: BEGIN → INSERT → COMMIT → BEGIN → INSERT → COMMIT → BEGIN → INSERT → ROLLBACK
 	// O ROLLBACK deve reverter apenas o terceiro INSERT
 	t.Run("rollback_after_multiple_commits", func(t *testing.T) {
 		// Primeiro ciclo: BEGIN → INSERT → COMMIT
-		_, err = pgtestDB.Exec("BEGIN")
+		_, err = pgrollbackDB.Exec("BEGIN")
 		if err != nil {
 			t.Fatalf("Failed to execute BEGIN cycle 1: %v", err)
 		}
-		insertOneRow(t, pgtestDB, tableName, "cycle1", "insert cycle 1 in rollback_after_multiple_commits test")
-		execCommit(t, pgtestDB)
+		insertOneRow(t, pgrollbackDB, tableName, "cycle1", "insert cycle 1 in rollback_after_multiple_commits test")
+		execCommit(t, pgrollbackDB)
 
 		// Segundo ciclo: BEGIN → INSERT → COMMIT
-		execBegin(t, pgtestDB, "")
-		insertOneRow(t, pgtestDB, tableName, "cycle2", "insert cycle 2 in rollback_after_multiple_commits test")
-		execCommit(t, pgtestDB)
+		execBegin(t, pgrollbackDB, "")
+		insertOneRow(t, pgrollbackDB, tableName, "cycle2", "insert cycle 2 in rollback_after_multiple_commits test")
+		execCommit(t, pgrollbackDB)
 
 		// Terceiro ciclo: BEGIN → INSERT → ROLLBACK
-		execBegin(t, pgtestDB, "")
-		insertOneRow(t, pgtestDB, tableName, "cycle3", "insert cycle 3 in rollback_after_multiple_commits test")
-		execRollbackOrFail(t, pgtestDB)
+		execBegin(t, pgrollbackDB, "")
+		insertOneRow(t, pgrollbackDB, tableName, "cycle3", "insert cycle 3 in rollback_after_multiple_commits test")
+		execRollbackOrFail(t, pgrollbackDB)
 
 		// Verifica que apenas os dois primeiros ciclos existem
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'cycle1'", tableName), 1, "Cycle 1 should exist")
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'cycle2'", tableName), 1, "Cycle 2 should exist")
-		assertQueryCount(t, pgtestDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'cycle3'", tableName), 0, "Cycle 3 should be rolled back")
+		assertQueryCount(t, pgrollbackDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'cycle1'", tableName), 1, "Cycle 1 should exist")
+		assertQueryCount(t, pgrollbackDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'cycle2'", tableName), 1, "Cycle 2 should exist")
+		assertQueryCount(t, pgrollbackDB, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'cycle3'", tableName), 0, "Cycle 3 should be rolled back")
 	})
 
-	// Limpa a transação do pgtest
-	execPgtestRollback(t, pgtestDB)
+	// Limpa a transação do pgrollback
+	execPgRollbackRollback(t, pgrollbackDB)
 
-	// Verifica que a tabela não existe mais após o rollback do pgtest
-	assertTableDoesNotExist(t, pgtestDB, tableName, "Table does not exist after pgtest rollback")
+	// Verifica que a tabela não existe mais após o rollback do pgrollback
+	assertTableDoesNotExist(t, pgrollbackDB, tableName, "Table does not exist after pgrollback rollback")
 }

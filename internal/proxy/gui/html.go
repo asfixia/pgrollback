@@ -15,7 +15,7 @@ const htmlTemplate = `<!DOCTYPE html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>PGTest Sessions</title>
+  <title>PgRollback Sessions</title>
   <link rel="icon" type="image/x-icon" href="__FAVICON_DATA_URI__">
   <style>
     *, *::before, *::after { box-sizing: border-box; }
@@ -274,7 +274,7 @@ const htmlTemplate = `<!DOCTYPE html>
 <body>
   <div class="page">
     <header class="header">
-      <h1><span>PGTest</span> Sessions</h1>
+      <h1><span>PgRollback</span> Sessions</h1>
       <div class="toolbar">
         <button type="button" id="refresh">Refresh</button>
         <button type="button" id="rollbackAllBtn" class="rollback-all-btn">Rollback All</button>

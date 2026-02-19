@@ -38,6 +38,6 @@ func StartGUIServer(provider SessionProvider, host string, port int) (stop func(
 			log.Printf("[GUI] Server error: %v", err)
 		}
 	}()
-	log.Printf("PGTest GUI available at http://%s", addr)
+	log.Printf("PgRollback GUI available at http://%s", addr)
 	return stop, nil
 }
