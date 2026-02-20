@@ -17,6 +17,28 @@ jobs:
     name: Run Go tests
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: postgres
+      PGPASSWORD: postgres
+      PGROLLBACK_CONFIG: config/pgrollback.yaml
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -32,6 +54,32 @@ jobs:
 
       - name: Install systray dependency (Linux)
         run: sudo apt-get update -y && sudo apt-get install -y libayatana-appindicator3-dev
+
+      - name: Create config file for CI
+        run: |
+          mkdir -p config
+          cat > config/pgrollback.yaml << 'EOF'
+          postgres:
+            host: localhost
+            port: 5432
+            database: postgres
+            user: postgres
+            password: postgres
+            session_timeout: 900s
+          proxy:
+            listen_host: localhost
+            listen_port: 5433
+            timeout: 60s
+            keepalive_interval: 300s
+          logging:
+            level: info
+            file: ""
+          test:
+            schema: public
+            context_timeout: 10s
+            query_timeout: 5s
+            ping_timeout: 3s
+          EOF
 
       - name: Run unit tests
         run: go test ./...
