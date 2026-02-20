@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	pg_query "github.com/pganalyze/pg_query_go/v5"
 
@@ -163,6 +164,7 @@ func (p *proxyConnection) ForwardCommandToDB(testID string, query string, sendRe
 
 	log.Printf("[PROXY] ForwardCommandToDB: Executando via transação: %s", query)
 	session.DB.SetLastQuery(query)
+	start := time.Now()
 
 	// All TCL (SAVEPOINT, RELEASE, ROLLBACK) goes to SafeExecTCL, which runs inside a guard
 	// so failed TCL does not abort the main transaction; it skips guard Commit on success
@@ -239,6 +241,10 @@ func (p *proxyConnection) ForwardCommandToDB(testID string, query string, sendRe
 		p.backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("-- ping")})
 	}
 
+	elapsed := time.Since(start)
+	if session.DB != nil {
+		session.DB.UpdateLastQueryHistoryDuration(elapsed)
+	}
 	if sendReadyForQuery {
 		if os.Getenv("PGROLLBACK_LOG_MESSAGE_ORDER") == "1" {
 			log.Printf("[MSG_ORDER] SEND ReadyForQuery")
@@ -276,6 +282,7 @@ func (p *proxyConnection) SafeForwardMultipleCommandsToDB(testID string, command
 	if !strings.HasSuffix(fullQuery, ";") {
 		fullQuery += ";"
 	}
+	start := time.Now()
 	session.DB.LockRun()
 	defer session.DB.UnlockRun()
 
@@ -388,6 +395,11 @@ func (p *proxyConnection) SafeForwardMultipleCommandsToDB(testID string, command
 		return fmt.Errorf("falha no flush de múltiplos resultados: %w", err)
 	}
 
+	elapsed := time.Since(start)
+	if session.DB != nil {
+		session.DB.updateLastQueryHistoryDurationLocked(elapsed)
+	}
+	log.Printf("[PROXY] Multi-command batch executed")
 	if sendReadyForQuery {
 		p.SendReadyForQuery()
 	}
@@ -404,6 +416,7 @@ func (p *proxyConnection) ExecuteSelectQuery(testID string, query string, sendRe
 		session.DB.SetLastQuery(query)
 	}
 
+	start := time.Now()
 	rows, err := session.DB.SafeQuery(context.Background(), query, args...)
 	if err != nil {
 		return err
@@ -414,6 +427,11 @@ func (p *proxyConnection) ExecuteSelectQuery(testID string, query string, sendRe
 		return err
 	}
 
+	elapsed := time.Since(start)
+	if session.DB != nil {
+		session.DB.UpdateLastQueryHistoryDuration(elapsed)
+	}
+	log.Printf("[PROXY] Query executed")
 	if sendReadyForQuery {
 		p.SendReadyForQuery()
 	}

@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	pg_query "github.com/pganalyze/pg_query_go/v5"
 
@@ -132,21 +133,25 @@ func (p *proxyConnection) executeViaExecPrepared(ctx context.Context, pgConn *pg
 	return nil
 }
 
+// runDisconnectCleanup runs rollback, release, and deallocate cleanup for this connection.
+// Call on disconnect so the shared session/backend state is correct. Run inline (before return).
+// We run deallocate first (it holds the session lock for the whole DEALLOCATE batch) so that
+// any other connection (e.g. conn2 polling prepared-statement count) is blocked until
+// statements are deallocated; then we run rollback/release (which take the lock briefly).
+func (p *proxyConnection) runDisconnectCleanup(testID string) {
+	remoteAddr := p.clientConn.RemoteAddr().String()
+	log.Printf("[PROXY] disconnect cleanup starting (testID=%s, conn=%s)", testID, remoteAddr)
+	p.deallocateBackendStatementsOnDisconnect(testID)
+	p.rollbackUserSavepointsOnDisconnect(testID)
+	p.releaseOpenTransactionOnDisconnect(testID)
+	log.Printf("[PROXY] disconnect cleanup done (testID=%s, conn=%s)", testID, remoteAddr)
+}
+
 // RunMessageLoop é o loop principal que processa as mensagens do cliente.
 // Ele mantém a conexão aberta e despacha cada mensagem para o handler apropriado.
 func (p *proxyConnection) RunMessageLoop(testID string) {
 	defer p.clientConn.Close()
-	defer func() {
-		p.rollbackUserSavepointsOnDisconnect(testID)
-		p.releaseOpenTransactionOnDisconnect(testID)
-		p.deallocateBackendStatementsOnDisconnect(testID)
-	}()
-
-	// Log para rastrear qual conexão TCP está processando mensagens
-	remoteAddr := p.clientConn.RemoteAddr().String()
-	log.Printf("[PROXY] Iniciando loop de mensagens (testID=%s, conn=%s)", testID, remoteAddr)
-	defer log.Printf("[PROXY] Finalizando loop de mensagens (testID=%s, conn=%s)", testID, remoteAddr)
-
+	defer p.runDisconnectCleanup(testID)
 	// Extended Query protocol (e.g. pgx for QueryContext("SELECT 1")) typically sends:
 	//   Parse → Describe(S) → Sync → Bind → Describe(P) → Execute → Sync
 	// We forward each message to the real PostgreSQL (via the session's PgConn) and relay
@@ -157,7 +162,7 @@ func (p *proxyConnection) RunMessageLoop(testID string) {
 		msg, err := p.backend.Receive()
 		if err != nil {
 			//if err != io.EOF {
-			log.Printf("[PROXY] xxxxxxx Erro ao receber mensagem do cliente (testID=%s, conn=%s): %v", testID, remoteAddr, err)
+			log.Printf("[PROXY] xxxxxxx Erro ao receber mensagem do cliente (testID=%s): %v", testID, err)
 			//}
 			return
 		}
@@ -194,14 +199,13 @@ func (p *proxyConnection) RunMessageLoop(testID string) {
 			p.handleMessageCopyData(testID)
 
 		default:
-			p.handleMessageDefault(testID, msg, remoteAddr)
+			p.handleMessageDefault(testID, msg)
 		}
 	}
 }
 
-func (p *proxyConnection) handleMessageDefault(testID string, msg pgproto3.FrontendMessage, remoteAddr string) {
+func (p *proxyConnection) handleMessageDefault(testID string, msg pgproto3.FrontendMessage) {
 	// Captura qualquer outra mensagem não tratada explicitamente.
-	log.Printf("[PROXY] ----------------- Mensagem não tratada: %T (testID=%s, conn=%s) - Enviando ReadyForQuery como fallback", msg, testID, remoteAddr)
 	p.SendReadyForQuery()
 	p.backend.Flush()
 }
@@ -326,8 +330,13 @@ func (p *proxyConnection) handleMessageExecute(testID string, msg *pgproto3.Exec
 	pgConn := session.DB.PgConn()
 	backendStmtName := p.backendStmtName(stmtName)
 	session.DB.LockRun()
+	start := time.Now()
 	err := p.executeViaExecPrepared(context.Background(), pgConn, backendStmtName, params, formatCodes, resultFormats)
+	elapsed := time.Since(start)
 	session.DB.UnlockRun()
+	if session.DB != nil {
+		session.DB.UpdateLastQueryHistoryDuration(elapsed)
+	}
 	if err != nil {
 		log.Printf("[PROXY] ExecPrepared failed: %v", err)
 		p.SendErrorResponse(err)
@@ -416,10 +425,15 @@ func (p *proxyConnection) handleMessageQuery(testID string, msg *pgproto3.Query)
 	//p.lastQuery = "" // Limpa a query armazenada para evitar execução duplicada
 	//p.inExtendedQuery = false
 	//p.mu.Unlock()
+	start := time.Now()
 	if err := p.ProcessSimpleQuery(testID, queryStr); err != nil {
 		log.Printf("[PROXY] Erro ao processar Query Simples: %v", err)
 		p.SendErrorResponse(err)
 	} else {
+		elapsed := time.Since(start)
+		if session := p.server.PgRollback.GetSession(testID); session != nil && session.DB != nil {
+			session.DB.UpdateLastQueryHistoryDuration(elapsed)
+		}
 		log.Printf("[PROXY] Query Simples processada com sucesso: %s", queryStr)
 	}
 	p.backend.Flush()

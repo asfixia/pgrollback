@@ -299,6 +299,8 @@ func (p *proxyConnection) clearStatementPortalState() {
 // deallocateBackendStatementsOnDisconnect deallocates all of this connection's backend prepared
 // statements (skips multi-statement; those were never prepared) and clears per-connection state.
 // Call on disconnect so the shared backend is clean. Uses session from p.server.PgRollback.GetSession(testID).
+// Holds session.DB lock for the entire cleanup so any other connection (e.g. running a query to
+// count prepared statements) observes the backend only after all DEALLOCATEs have completed.
 func (p *proxyConnection) deallocateBackendStatementsOnDisconnect(testID string) {
 	session := p.server.PgRollback.GetSession(testID)
 	if session == nil || session.DB == nil {

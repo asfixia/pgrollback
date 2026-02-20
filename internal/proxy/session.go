@@ -51,6 +51,14 @@ type PgRollback struct {
 	backendStartupCache *BackendStartupCache
 }
 
+// GetLastQueryDuration returns the last query execution duration (e.g. "12.345ms") for GUI, derived from the last history entry.
+func (s *TestSession) GetLastQueryDuration() string {
+	if s.DB == nil {
+		return ""
+	}
+	return s.DB.GetLastQueryDuration()
+}
+
 func (p *PgRollback) GetTestID(session *TestSession) string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

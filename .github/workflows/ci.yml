@@ -84,6 +84,32 @@ jobs:
       - name: Run unit tests
         run: go test ./...
 
+  build-windows:
+    name: Build pgrollback (Windows)
+    runs-on: windows-latest
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/')   # only build when the commit is a tag
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Build pgrollback
+        run: go build -o bin/pgrollback.exe ./cmd/pgrollback
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pgrollback-windows-amd64
+          path: bin/pgrollback.exe
+
+
   build:
     name: Build pgrollback binary
     runs-on: ubuntu-latest
@@ -104,7 +130,7 @@ jobs:
         run: sudo apt-get update -y && sudo apt-get install -y libayatana-appindicator3-dev
 
       - name: Build pgrollback
-        run: go build -o bin/pgrollback ./cmd/pgtest
+        run: go build -o bin/pgrollback ./cmd/pgrollback
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
@@ -112,28 +138,4 @@ jobs:
           name: pgrollback-linux-amd64
           path: bin/pgrollback
 
-  build-windows:
-    name: Build pgrollback (Windows)
-    runs-on: windows-latest
-    needs: test
-    if: startsWith(github.ref, 'refs/tags/')   # only build when the commit is a tag
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.23'
-          cache: true
-
-      - name: Build pgrollback
-        run: go build -o bin/pgrollback.exe ./cmd/pgtest
-
-      - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: pgrollback-windows-amd64
-          path: bin/pgrollback.exe
-
+  

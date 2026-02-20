@@ -41,6 +41,8 @@ type Server struct {
 	wg         sync.WaitGroup
 	startErr   error
 	mu         sync.RWMutex
+	// activeConns holds all accepted client connections so Stop() can close them and unblock handlers
+	activeConns map[net.Conn]struct{}
 	// GUI on same port: connections that look like HTTP are pushed here and served by guiHTTP
 	guiCh       chan net.Conn
 	guiListener *injectListener
@@ -85,9 +87,10 @@ func NewServer(postgresHost string, postgresPort int, postgresDB, postgresUser, 
 
 	pgrollback := NewPgRollback(postgresHost, postgresPort, postgresDB, postgresUser, postgresPass, timeout, sessionTimeout, keepaliveInterval)
 	server := &Server{
-		PgRollback: pgrollback,
-		listenHost: listenHost,
-		listenPort: listenPort,
+		PgRollback:  pgrollback,
+		listenHost:  listenHost,
+		listenPort:  listenPort,
+		activeConns: make(map[net.Conn]struct{}),
 	}
 
 	bindPort := listenPort
@@ -241,6 +244,11 @@ func (s *Server) Stop() error {
 	if s.listener != nil {
 		listener := s.listener
 		s.listener = nil
+		// Copy active connections so we can close them without holding mu (closing unblocks handlers)
+		conns := make([]net.Conn, 0, len(s.activeConns))
+		for c := range s.activeConns {
+			conns = append(conns, c)
+		}
 		s.mu.Unlock()
 		if err := listener.Close(); err != nil {
 			return err
@@ -253,11 +261,30 @@ func (s *Server) Stop() error {
 			_ = s.guiHTTP.Shutdown(ctx)
 			cancel()
 		}
+		for _, c := range conns {
+			_ = c.Close()
+		}
 	} else {
 		s.mu.Unlock()
 	}
 	s.wg.Wait()
 	return nil
+}
+
+// addActiveConn records a client connection so Stop() can close it to unblock handlers.
+func (s *Server) addActiveConn(c net.Conn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.activeConns != nil {
+		s.activeConns[c] = struct{}{}
+	}
+}
+
+// removeActiveConn removes a client connection from the active set (e.g. when handler returns).
+func (s *Server) removeActiveConn(c net.Conn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.activeConns, c)
 }
 
 // StartError retorna o erro de inicialização, se houver
@@ -270,6 +297,8 @@ func (s *Server) StartError() error {
 func (s *Server) handleConnection(clientConn net.Conn) {
 	defer s.wg.Done()
 	defer clientConn.Close()
+	s.addActiveConn(clientConn)
+	defer s.removeActiveConn(clientConn)
 
 	// Log para rastrear conexões TCP ao pgrollback
 	remoteAddr := clientConn.RemoteAddr().String()

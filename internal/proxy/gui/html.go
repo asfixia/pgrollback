@@ -112,6 +112,7 @@ const htmlTemplate = `<!DOCTYPE html>
       color: #94a3b8;
       padding-right: 0.5rem;
     }
+    .query-duration { color: #64748b; font-weight: 500; margin-left: 0.25rem; }
     .actions { white-space: nowrap; }
     .history-btn, .close-btn, .clear-log-btn {
       padding: 0.35rem 0.75rem;
@@ -360,13 +361,15 @@ const htmlTemplate = `<!DOCTYPE html>
     function historyItemHtml(item) {
       var query = '';
       var at = '';
+      var dur = '';
       if (item && typeof item === 'object' && item.query !== undefined) {
         query = item.query || '';
         at = item.at ? '<span class="qtime">' + escapeHtml(formatHistoryAt(item.at)) + '</span>' : '';
+        dur = (item.duration && item.duration.trim()) ? ' <span class="query-duration">(' + escapeHtml(item.duration) + ')</span>' : '';
       } else {
         query = typeof item === 'string' ? item : '';
       }
-      return at + escapeHtml(prettySql(query));
+      return at + dur + ' ' + escapeHtml(prettySql(query));
     }
     var openHistoryIds = {};
     var historyScrollTops = {};
@@ -382,11 +385,12 @@ const htmlTemplate = `<!DOCTYPE html>
       sessions.forEach(function(s) {
         var q = escapeHtml(s.last_query || '');
         var qTitle = (s.last_query || '');
+        var dur = (s.last_query_duration && s.last_query_duration.trim()) ? (' <span class="query-duration">(' + escapeHtml(s.last_query_duration) + ')</span>') : '';
         var hist = s.query_history || [];
         var n = hist.length;
         var txLabel = (s.in_transaction === true) ? 'Yes' : 'No';
         var txClass = (s.in_transaction === true) ? 'tx-status yes' : 'tx-status no';
-        html += '<tr class="session-row" data-id="' + escapeHtml(s.test_id) + '"><td>' + escapeHtml(s.test_id) + '</td><td class="' + txClass + '">' + txLabel + '</td><td class="query" title="' + escapeHtml(qTitle) + '">' + q + '</td><td><button type="button" class="history-btn" data-id="' + escapeHtml(s.test_id) + '">History (' + n + ')</button><button type="button" class="clear-log-btn" data-id="' + escapeHtml(s.test_id) + '">Clear log</button><button type="button" class="close-btn" data-id="' + escapeHtml(s.test_id) + '">Disconnect</button></td></tr>';
+        html += '<tr class="session-row" data-id="' + escapeHtml(s.test_id) + '"><td>' + escapeHtml(s.test_id) + '</td><td class="' + txClass + '">' + txLabel + '</td><td class="query" title="' + escapeHtml(qTitle) + '">' + q + dur + '</td><td><button type="button" class="history-btn" data-id="' + escapeHtml(s.test_id) + '">History (' + n + ')</button><button type="button" class="clear-log-btn" data-id="' + escapeHtml(s.test_id) + '">Clear log</button><button type="button" class="close-btn" data-id="' + escapeHtml(s.test_id) + '">Disconnect</button></td></tr>';
         html += '<tr class="history-row" data-id="' + escapeHtml(s.test_id) + '" style="display:none"><td colspan="4"><div class="history-list-wrap"><div class="history-list-toolbar"><button type="button" class="history-height-btn">Full height</button></div><div class="history-list"><ul>';
         for (var j = 0; j < hist.length; j++) {
           html += '<li>' + historyItemHtml(hist[j]) + '</li>';
@@ -441,6 +445,7 @@ const htmlTemplate = `<!DOCTYPE html>
       var mainRow = tbody.querySelector(sel);
       if (!mainRow) return;
       var q = s.last_query || '';
+      var dur = (s.last_query_duration && s.last_query_duration.trim()) ? (' <span class="query-duration">(' + escapeHtml(s.last_query_duration) + ')</span>') : '';
       var hist = s.query_history || [];
       var n = hist.length;
       mainRow.cells[0].textContent = s.test_id;
@@ -448,7 +453,7 @@ const htmlTemplate = `<!DOCTYPE html>
       mainRow.cells[1].textContent = txLabel;
       mainRow.cells[1].className = (s.in_transaction === true) ? 'tx-status yes' : 'tx-status no';
       var queryCell = mainRow.cells[2];
-      queryCell.textContent = q;
+      queryCell.innerHTML = escapeHtml(q) + dur;
       queryCell.title = q;
       queryCell.className = 'query';
       var histBtn = mainRow.querySelector('.history-btn');

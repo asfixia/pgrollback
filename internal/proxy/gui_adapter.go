@@ -20,20 +20,22 @@ func (a *sessionProviderAdapter) GetSessions() []gui.SessionInfo {
 		inTransaction := false
 		lastQuery := ""
 		var queryHistory []gui.QueryHistoryItem
+		lastQueryDuration := session.GetLastQueryDuration()
 		if session.DB != nil {
 			inTransaction = session.DB.HasOpenUserTransaction()
 			lastQuery = session.DB.GetLastQuery()
 			entries := session.DB.GetQueryHistory()
 			queryHistory = make([]gui.QueryHistoryItem, len(entries))
 			for i, e := range entries {
-				queryHistory[i] = gui.QueryHistoryItem{Query: e.Query, At: e.At.Format(time.RFC3339)}
+				queryHistory[i] = gui.QueryHistoryItem{Query: e.Query, At: e.At.Format(time.RFC3339), Duration: e.Duration}
 			}
 		}
 		list = append(list, gui.SessionInfo{
-			TestID:        testID,
-			InTransaction: inTransaction,
-			LastQuery:     lastQuery,
-			QueryHistory:  queryHistory,
+			TestID:            testID,
+			InTransaction:     inTransaction,
+			LastQuery:         lastQuery,
+			LastQueryDuration: lastQueryDuration,
+			QueryHistory:      queryHistory,
 		})
 	}
 	return list

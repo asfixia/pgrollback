@@ -34,9 +34,8 @@ type realSessionDB struct {
 	mu                   sync.RWMutex // state + serializes SQL execution (Lock for SafeExec/SafeQuery/SafeExecTCL and PgConn().Exec)
 	SavepointLevel       int
 	connectionWithOpenTx ConnectionID // which connection has the transaction; 0 when none
-	stopKeepalive        func()
-	lastQuery   string
-	queryHistory []queryHistoryEntry // last N executed queries (oldest first), max maxQueryHistory
+	stopKeepalive func()
+	queryHistory  []QueryHistoryEntry // last N executed queries (oldest first), max maxQueryHistory
 }
 
 func (d *realSessionDB) GetSavepointLevel() int {
@@ -180,11 +179,14 @@ func (d *realSessionDB) releaseOpenTransactionLocked(connID ConnectionID) {
 	}
 }
 
-// GetLastQuery returns the last executed query for this session (for GUI/status).
+// GetLastQuery returns the last executed query for this session (for GUI/status), derived from query history.
 func (d *realSessionDB) GetLastQuery() string {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	return d.lastQuery
+	if len(d.queryHistory) == 0 {
+		return ""
+	}
+	return d.queryHistory[len(d.queryHistory)-1].Query
 }
 
 // Ensure realSessionDB implements pgxQueryer (used by tx_guard).
@@ -533,7 +535,6 @@ func (d *realSessionDB) startNewTx(ctx context.Context) error {
 func (d *realSessionDB) close(ctx context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.lastQuery = ""
 	d.queryHistory = nil
 	if d.stopKeepalive != nil {
 		d.stopKeepalive()

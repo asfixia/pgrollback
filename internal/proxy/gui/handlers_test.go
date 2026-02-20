@@ -288,7 +288,7 @@ func TestSessionInfo_JSONShape(t *testing.T) {
 	}
 	s := string(data)
 	// Check that JSON keys match the expected shape
-	for _, key := range []string{`"test_id"`, `"in_transaction"`, `"last_query"`, `"query_history"`, `"query"`, `"at"`} {
+	for _, key := range []string{`"test_id"`, `"in_transaction"`, `"last_query"`, `"last_query_duration"`, `"query_history"`, `"query"`, `"at"`, `"duration"`} {
 		if !strings.Contains(s, key) {
 			t.Errorf("JSON missing key %s: %s", key, s)
 		}

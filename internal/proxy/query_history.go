@@ -9,15 +9,11 @@ import (
 
 const maxQueryHistory = 100
 
-// QueryHistoryEntry is one item in the session's query history (for GUI).
+// QueryHistoryEntry is one item in the session's query history (for GUI and internal storage).
 type QueryHistoryEntry struct {
-	Query string
-	At    time.Time
-}
-
-type queryHistoryEntry struct {
-	Query string
-	At    time.Time
+	Query    string
+	At       time.Time
+	Duration string // execution time e.g. "12.345ms"; set when query completes
 }
 
 // isInternalNoiseQuery returns true for standard driver/internal queries we don't want in the GUI history.
@@ -44,8 +40,7 @@ func (d *realSessionDB) SetLastQuery(query string) {
 	if isInternalNoiseQuery(query) {
 		return
 	}
-	d.lastQuery = query
-	d.queryHistory = append(d.queryHistory, queryHistoryEntry{Query: query, At: time.Now()})
+	d.queryHistory = append(d.queryHistory, QueryHistoryEntry{Query: query, At: time.Now(), Duration: ""})
 	if len(d.queryHistory) > maxQueryHistory {
 		d.queryHistory = d.queryHistory[1:]
 	}
@@ -71,23 +66,51 @@ func (d *realSessionDB) GetQueryHistory() []QueryHistoryEntry {
 		return nil
 	}
 	out := make([]QueryHistoryEntry, len(d.queryHistory))
-	for i, e := range d.queryHistory {
-		out[i] = QueryHistoryEntry{Query: e.Query, At: e.At}
-	}
+	copy(out, d.queryHistory)
 	return out
 }
 
-// ClearLastQuery clears the lastQuery field (used e.g. on full rollback).
+// GetLastQueryDuration returns the duration of the last query in history (for GUI "last query" column), or "" if none.
+func (d *realSessionDB) GetLastQueryDuration() string {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if len(d.queryHistory) == 0 {
+		return ""
+	}
+	return d.queryHistory[len(d.queryHistory)-1].Duration
+}
+
+// UpdateLastQueryHistoryDuration sets the duration of the most recently appended query (call after execution completes).
+func (d *realSessionDB) UpdateLastQueryHistoryDuration(elapsed time.Duration) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.updateLastQueryHistoryDurationLocked(elapsed)
+}
+
+// updateLastQueryHistoryDurationLocked updates the last history entry's duration. Caller must hold d.mu.
+func (d *realSessionDB) updateLastQueryHistoryDurationLocked(elapsed time.Duration) {
+	if len(d.queryHistory) == 0 {
+		return
+	}
+	if elapsed == 0 {
+		d.queryHistory[len(d.queryHistory)-1].Duration = ""
+		return
+	}
+	d.queryHistory[len(d.queryHistory)-1].Duration = elapsed.String()
+}
+
+// ClearLastQuery removes the last query from history so GetLastQuery() returns "" or the previous query (used e.g. on full rollback).
 func (d *realSessionDB) ClearLastQuery() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.lastQuery = ""
+	if len(d.queryHistory) > 0 {
+		d.queryHistory = d.queryHistory[:len(d.queryHistory)-1]
+	}
 }
 
-// ClearQueryHistory clears the query history and last query (called when session is closed or via GUI).
+// ClearQueryHistory clears the query history (called when session is closed or via GUI).
 func (d *realSessionDB) ClearQueryHistory() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.lastQuery = ""
 	d.queryHistory = nil
 }

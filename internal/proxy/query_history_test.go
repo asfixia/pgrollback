@@ -202,10 +202,10 @@ func TestClearLastQuery(t *testing.T) {
 	if got := db.GetLastQuery(); got != "" {
 		t.Errorf("after ClearLastQuery, got = %q, want empty", got)
 	}
-	// History should still be there
+	// Last entry was removed from history (last query is derived from history)
 	hist := db.GetQueryHistory()
-	if len(hist) != 1 {
-		t.Errorf("history len = %d, want 1", len(hist))
+	if len(hist) != 0 {
+		t.Errorf("history len = %d, want 0 after ClearLastQuery", len(hist))
 	}
 }
 
