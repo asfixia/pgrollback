@@ -161,9 +161,6 @@ func (p *proxyConnection) RunMessageLoop(testID string) {
 	for {
 		msg, err := p.backend.Receive()
 		if err != nil {
-			//if err != io.EOF {
-			log.Printf("[PROXY] xxxxxxx Erro ao receber mensagem do cliente (testID=%s): %v", testID, err)
-			//}
 			return
 		}
 

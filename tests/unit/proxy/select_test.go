@@ -2,6 +2,7 @@ package tstproxy
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -41,7 +42,11 @@ func TestSelect1AsUm(t *testing.T) {
 
 // TestSelectSiteUser runs SELECT * FROM p_conab_cafe.site_user LIMIT 10 through the proxy,
 // asserts row count is 10, discovers how many fields are returned, and asserts at least two different column types.
+// Skipped in CI (e.g. GitHub Actions) because the database has no p_conab_cafe schema/site_user table.
 func TestSelectSiteUser(t *testing.T) {
+	if os.Getenv("GITHUB_ACTIONS") == "true" || os.Getenv("CI") == "true" {
+		t.Skip("Skipping TestSelectSiteUser in CI: requires p_conab_cafe.site_user table (application schema)")
+	}
 	cfg := getConfigForProxyTest(t)
 	if cfg == nil {
 		return
