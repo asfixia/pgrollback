@@ -189,23 +189,33 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: pgrollback-linux-amd64
+          path: artifacts/pgrollback-linux-amd64
 
       - name: Download Windows binary
         uses: actions/download-artifact@v4
         with:
           name: pgrollback-windows-amd64
+          path: artifacts/pgrollback-windows-amd64
 
       - name: Rename binaries with tag and OS
         run: |
+          set -e
           TAG="${GITHUB_REF#refs/tags/}"
           mkdir -p release
-          # Each artifact extracts into a folder named after the artifact; binary may be at root or under bin/
-          LINUX_BIN=pgrollback-linux-amd64/pgrollback
-          [ -f pgrollback-linux-amd64/bin/pgrollback ] && LINUX_BIN=pgrollback-linux-amd64/bin/pgrollback
-          WIN_BIN=pgrollback-windows-amd64/pgrollback.exe
-          [ -f pgrollback-windows-amd64/bin/pgrollback.exe ] && WIN_BIN=pgrollback-windows-amd64/bin/pgrollback.exe
+
+          LINUX_BIN="artifacts/pgrollback-linux-amd64/pgrollback"
+          WIN_BIN="artifacts/pgrollback-windows-amd64/pgrollback.exe"
+
+          # fallback se o upload preservou "bin/"
+          [ -f "artifacts/pgrollback-linux-amd64/bin/pgrollback" ] && LINUX_BIN="artifacts/pgrollback-linux-amd64/bin/pgrollback"
+          [ -f "artifacts/pgrollback-windows-amd64/bin/pgrollback.exe" ] && WIN_BIN="artifacts/pgrollback-windows-amd64/bin/pgrollback.exe"
+
+          ls -la artifacts/pgrollback-linux-amd64 || true
+          ls -la artifacts/pgrollback-windows-amd64 || true
+
           mv "$LINUX_BIN" "release/pgrollback-${TAG}-linux-amd64"
           mv "$WIN_BIN" "release/pgrollback-${TAG}-windows-amd64.exe"
+
           ls -la release/
 
       - name: Create Release and upload assets
