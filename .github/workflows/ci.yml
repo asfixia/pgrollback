@@ -200,12 +200,8 @@ jobs:
           TAG="${GITHUB_REF#refs/tags/}"
           mkdir -p release
           # Artifact may be at root or under bin/ depending on upload-artifact behavior
-          LINUX_BIN=pgrollback-linux-amd64/pgrollback
-          [ -f pgrollback-linux-amd64/bin/pgrollback ] && LINUX_BIN=pgrollback-linux-amd64/bin/pgrollback
-          WIN_BIN=pgrollback-windows-amd64/pgrollback.exe
-          [ -f pgrollback-windows-amd64/bin/pgrollback.exe ] && WIN_BIN=pgrollback-windows-amd64/bin/pgrollback.exe
-          mv "$LINUX_BIN" "release/pgrollback-${TAG}-linux-amd64"
-          mv "$WIN_BIN" "release/pgrollback-${TAG}-windows-amd64.exe"
+          mv "bin/pgrollback" "release/pgrollback-${TAG}-linux-amd64"
+          mv "bin/pgrollback.exe" "release/pgrollback-${TAG}-windows-amd64.exe"
           ls -la release/
 
       - name: Create Release and upload assets
