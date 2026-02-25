@@ -164,8 +164,8 @@ jobs:
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           mkdir -p release
-          mv pgrollback-linux-amd64/pgrollback "release/pgrollback-${TAG}-linux-amd64"
-          mv pgrollback-windows-amd64/pgrollback.exe "release/pgrollback-${TAG}-windows-amd64.exe"
+          mv pgrollback-linux-amd64/bin/pgrollback "release/pgrollback-${TAG}-linux-amd64"
+          mv pgrollback-windows-amd64/bin/pgrollback.exe "release/pgrollback-${TAG}-windows-amd64.exe"
           ls -la release/
 
       - name: Create Release and upload assets
