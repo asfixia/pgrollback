@@ -197,7 +197,7 @@ jobs:
           name: pgrollback-windows-amd64
           path: artifacts/pgrollback-windows-amd64
 
-      - name: Rename binaries with tag and OS
+      - name: Prepare release binaries and config
         run: |
           set -e
           TAG="${GITHUB_REF#refs/tags/}"
@@ -215,6 +215,30 @@ jobs:
 
           mv "$LINUX_BIN" "release/pgrollback-${TAG}-linux-amd64"
           mv "$WIN_BIN" "release/pgrollback-${TAG}-windows-amd64.exe"
+
+          # include default config in the release assets
+          cat > release/pgrollback.yaml << 'EOF'
+          postgres:
+            host: localhost
+            port: 5432
+            database: postgres
+            user: postgres
+            password: postgres
+            session_timeout: 900s
+          proxy:
+            listen_host: localhost
+            listen_port: 5433
+            timeout: 60s
+            keepalive_interval: 300s
+          logging:
+            level: info
+            file: ""
+          test:
+            schema: public
+            context_timeout: 10s
+            query_timeout: 5s
+            ping_timeout: 3s
+          EOF
 
           ls -la release/
 
