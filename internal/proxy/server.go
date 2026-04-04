@@ -207,6 +207,7 @@ func (s *Server) acceptConnections() {
 			continue
 		}
 
+		s.debugLogIncomingConn(conn)
 		if s.guiCh != nil {
 			conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 			peeked := make([]byte, peekSize)
