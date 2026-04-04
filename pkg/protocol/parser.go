@@ -20,7 +20,7 @@ func ExtractTestID(params map[string]string) (string, error) {
 	}
 
 	// Verifica se está no formato pgrollback_<test_id>
-	match := regexp.MustCompile(`^pgrollback_(.+)$`).FindStringSubmatch(appName)
+	match := regexp.MustCompile(`^pgrollback[_-](.+)$`).FindStringSubmatch(appName)
 	if match != nil {
 		return match[1], nil
 	}
