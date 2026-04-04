@@ -160,6 +160,68 @@ func TestDestroySession(t *testing.T) {
 			t.Error("Session should be removed after destroy")
 		}
 	})
+
+	t.Run("destroy_always_cleans_up_even_after_cancel", func(t *testing.T) {
+		testID := "test_destroy_after_cancel"
+		session, err := pgrollback.GetOrCreateSession(testID)
+		if err != nil {
+			t.Fatalf("GetOrCreateSession() error = %v", err)
+		}
+		if session == nil {
+			t.Fatal("Session should not be nil")
+		}
+
+		hadDB := session.DB != nil
+
+		// Cancel the session context first (simulates the real destroy flow
+		// where Cancel() is called to unblock in-flight queries). This puts
+		// the session in a state where rollbackTx may fail with context errors.
+		session.Cancel()
+
+		err = pgrollback.DestroySession(testID)
+		if err != nil {
+			t.Fatalf("DestroySession() should succeed even after Cancel(), got: %v", err)
+		}
+
+		// Session MUST be removed from the map regardless of rollback errors.
+		if pgrollback.GetSession(testID) != nil {
+			t.Error("Session must be removed from map after DestroySession, even if rollback failed")
+		}
+
+		// DB MUST be nil (connection closed).
+		if hadDB && session.DB != nil {
+			t.Error("session.DB must be nil after DestroySession (connection leaked)")
+		}
+	})
+
+	t.Run("destroy_removes_session_when_db_in_error_state", func(t *testing.T) {
+		testID := "test_destroy_error_state"
+		session, err := pgrollback.GetOrCreateSession(testID)
+		if err != nil {
+			t.Fatalf("GetOrCreateSession() error = %v", err)
+		}
+		if session == nil {
+			t.Fatal("Session should not be nil")
+		}
+
+		// Put the transaction in an aborted state by executing invalid SQL,
+		// so rollbackTx will encounter a non-trivial state.
+		if session.DB != nil {
+			_, _ = session.DB.Exec(session.Context(), "SELECT invalid_column_xyz FROM nonexistent_table_xyz")
+		}
+
+		err = pgrollback.DestroySession(testID)
+		if err != nil {
+			t.Fatalf("DestroySession() should succeed even with aborted tx, got: %v", err)
+		}
+
+		if pgrollback.GetSession(testID) != nil {
+			t.Error("Session must be removed from map even when tx was in error state")
+		}
+		if session.DB != nil {
+			t.Error("session.DB must be nil after DestroySession")
+		}
+	})
 }
 
 func TestCleanupExpiredSessions(t *testing.T) {
@@ -199,7 +261,10 @@ func TestCleanupExpiredSessions(t *testing.T) {
 
 	time.Sleep(150 * time.Millisecond)
 
-	cleaned := pgrollback.CleanupExpiredSessions()
+	cleaned, err := pgrollback.CleanupExpiredSessions()
+	if err != nil {
+		t.Fatalf("CleanupExpiredSessions() error = %v", err)
+	}
 	if cleaned != 1 {
 		t.Errorf("CleanupExpiredSessions() = %v, want 1", cleaned)
 	}
@@ -249,7 +314,10 @@ func TestSessionTimeout(t *testing.T) {
 	// Espera mais que o timeout - sessão deve expirar
 	time.Sleep(20 * time.Millisecond)
 
-	cleaned := pgrollback.CleanupExpiredSessions()
+	cleaned, err := pgrollback.CleanupExpiredSessions()
+	if err != nil {
+		t.Fatalf("CleanupExpiredSessions() error = %v", err)
+	}
 	if cleaned == 0 {
 		t.Log("Session may not have expired yet, but cleanup should work")
 	} else {

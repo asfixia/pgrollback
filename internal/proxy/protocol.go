@@ -7,9 +7,41 @@ import (
 )
 
 const (
-	ProtocolVersion = 196608
-	SSLRequestCode  = 80877103 // Código da mensagem SSLRequest do PostgreSQL
+	ProtocolVersion        = 196608
+	PostgresSSLRequestCode = 80877103 // Código da mensagem SSLRequest do PostgreSQL
+	// specialRequestTotalBytes is the on-wire size of SSLRequest / CancelRequest (4-byte length + 4-byte code).
+	specialRequestTotalBytes = 8
 )
+
+// IsSSLRequestLength reports whether the first int32 on the wire is PostgreSQL's special-request
+// frame size (8 bytes total), i.e. SSLRequest or CancelRequest, as opposed to a StartupMessage length.
+func IsSSLRequestLength(length int32) bool {
+	return length == specialRequestTotalBytes
+}
+
+// ReadFrontendMessageLength reads the first 4 bytes of a PostgreSQL frontend connection as a big-endian int32.
+// That value is either the total byte length of a StartupMessage (including the length field itself) or 8 for an
+// SSLRequest / CancelRequest special frame (4-byte length + 4-byte request code).
+func ReadFrontendMessageLength(r io.Reader) (length int32, err error) {
+	if err := binary.Read(r, binary.BigEndian, &length); err != nil {
+		return 0, fmt.Errorf("read frontend message length: %w", err)
+	}
+	return length, nil
+}
+
+// ReadSpecialRequestCode reads the 4-byte request code that follows the length field of a PostgreSQL
+// special request (caller must have already read the length and verified IsSSLRequestLength(length)).
+func ReadSpecialRequestCode(r io.Reader) (code int32, err error) {
+	if err := binary.Read(r, binary.BigEndian, &code); err != nil {
+		return 0, fmt.Errorf("read special request code: %w", err)
+	}
+	return code, nil
+}
+
+// IsPostgresSSLRequestCode reports whether code is the PostgreSQL SSLRequest payload (after the 4-byte length).
+func IsPostgresSSLRequestCode(code int32) bool {
+	return code == PostgresSSLRequestCode
+}
 
 type StartupMessage struct {
 	ProtocolVersion int32

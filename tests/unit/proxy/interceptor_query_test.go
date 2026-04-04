@@ -528,7 +528,7 @@ func TestInterceptQuery_MultipleSavepoints(t *testing.T) {
 
 func TestExecuteWithLock(t *testing.T) {
 	pgrollback := newPgRollbackFromConfig()
-	testID := "test_execute_lock"
+	testID := "test_execute_lock_unique_id_1231231567"
 	session, err := pgrollback.GetOrCreateSession(testID)
 	if err != nil {
 		t.Skip("Skipping test - requires PostgreSQL connection")
@@ -547,7 +547,7 @@ func TestExecuteWithLock(t *testing.T) {
 		err := pgrollback.ExecuteWithLock(session, query)
 		// Pode falhar se a tabela não existir, mas não deve falhar por lock
 		if err != nil && !contains(err.Error(), "does not exist") && !contains(err.Error(), "relation") {
-			t.Logf("ExecuteWithLock(INSERT) error = %v (may be expected if table doesn't exist)", err)
+			t.Errorf("ExecuteWithLock(INSERT) error = %v (may be expected if table doesn't exist)", err)
 		}
 	})
 
@@ -556,7 +556,7 @@ func TestExecuteWithLock(t *testing.T) {
 		err := pgrollback.ExecuteWithLock(session, query)
 		// Pode falhar se a tabela não existir, mas não deve falhar por lock
 		if err != nil && !contains(err.Error(), "does not exist") && !contains(err.Error(), "relation") {
-			t.Logf("ExecuteWithLock(UPDATE) error = %v (may be expected if table doesn't exist)", err)
+			t.Errorf("ExecuteWithLock(UPDATE) error = %v (may be expected if table doesn't exist)", err)
 		}
 	})
 }

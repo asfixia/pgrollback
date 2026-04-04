@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -309,48 +310,58 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 
 	clientConn.SetDeadline(time.Now().Add(ConnectionTimeout))
 
-	var length int32
-	if err := binary.Read(clientConn, binary.BigEndian, &length); err != nil {
-		if err != io.EOF {
+	length, err := ReadFrontendMessageLength(clientConn)
+	if err != nil {
+		if !errors.Is(err, io.EOF) {
 			log.Printf("Error reading message length: %v", err)
 		}
 		return
 	}
 
-	// Verifica se é SSLRequest (length = 8)
-	if length == 8 {
-		var code int32
-		if err := binary.Read(clientConn, binary.BigEndian, &code); err != nil {
-			log.Printf("Error reading SSL request code: %v", err)
-			return
-		}
-
-		if code == SSLRequestCode {
-			if err := WriteSSLResponse(clientConn, false); err != nil {
-				log.Printf("Error writing SSL response: %v", err)
-				return
-			}
-			// Backend normal após tratar SSLRequest
-			backend := pgproto3.NewBackend(clientConn, clientConn)
-			s.processConnectionStartupMessage(backend, clientConn)
-			return
-		} else {
-			// Reconstruir bytes lidos
-			backend := s.createBackendWithPreRead(clientConn, 8, length, code)
-			s.processConnectionStartupMessage(backend, clientConn)
-			return
-		}
-		//// Length 8 was the SSL (or cancel) request; we consumed it. Next wire content is the StartupMessage.
-		//// Do not feed the 8 bytes back into the backend or ReceiveStartupMessage() will misparse (length=8 + 4 bytes body) and params/testID can be wrong, breaking the handshake.
-		//backend := pgproto3.NewBackend(clientConn, clientConn)
-		//s.processConnectionStartupMessage(backend, clientConn)
-		//return
-	} else {
-		// First message is the StartupMessage: we read only the 4-byte length; put it back so the backend sees length + body.
-		backend := s.createBackendWithPreRead(clientConn, 4, length, 0)
-		s.processConnectionStartupMessage(backend, clientConn)
+	if !IsSSLRequestLength(length) {
+		s.resumeStartupMessageAfterLengthPrefix(clientConn, length)
 		return
 	}
+	s.handleEightByteSpecialFrame(clientConn, length)
+}
+
+// handleEightByteSpecialFrame runs after we read length==8 and must read the following request code.
+func (s *Server) handleEightByteSpecialFrame(clientConn net.Conn, length int32) {
+	code, err := ReadSpecialRequestCode(clientConn)
+	if err != nil {
+		log.Printf("Error reading special request code: %v", err)
+		return
+	}
+
+	switch {
+	case IsPostgresSSLRequestCode(code):
+		s.replySSLNotSupportedThenStartup(clientConn)
+	default:
+		s.processStartupWithReplayedSpecialFrame(clientConn, length, code)
+	}
+}
+
+// resumeStartupMessageAfterLengthPrefix re-injects the 4-byte StartupMessage length we already read.
+func (s *Server) resumeStartupMessageAfterLengthPrefix(clientConn net.Conn, length int32) {
+	backend := s.createBackendWithPreRead(clientConn, 4, length, 0)
+	s.processConnectionStartupMessage(backend, clientConn)
+}
+
+// replySSLNotSupportedThenStartup implements the PostgreSQL SSL negotiation: respond with 'N' (SSL not available),
+// then proceed as if the next bytes are a normal StartupMessage (same TCP connection).
+func (s *Server) replySSLNotSupportedThenStartup(clientConn net.Conn) {
+	if err := WriteSSLResponse(clientConn, false); err != nil {
+		log.Printf("Error writing SSL response: %v", err)
+		return
+	}
+	backend := pgproto3.NewBackend(clientConn, clientConn)
+	s.processConnectionStartupMessage(backend, clientConn)
+}
+
+// processStartupWithReplayedSpecialFrame replays an 8-byte special request (length+code) then runs startup.
+func (s *Server) processStartupWithReplayedSpecialFrame(clientConn net.Conn, length int32, code int32) {
+	backend := s.createBackendWithPreRead(clientConn, 8, length, code)
+	s.processConnectionStartupMessage(backend, clientConn)
 }
 
 // createBackendWithPreRead cria um backend reconstruindo bytes já lidos

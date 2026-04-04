@@ -46,7 +46,8 @@ func onReady(guiURL string) {
 	systray.SetTooltip(fmt.Sprintf("PgRollback Proxy – %s", proxyAddr))
 
 	mOpen := systray.AddMenuItem(fmt.Sprintf("Open GUI \"%s\"", guiURL), "Open PgRollback GUI in the browser")
-	mRollbackAll := systray.AddMenuItem("Rollback All", "Disconnect all clients (rollback all sessions)")
+	mRollbackAll := systray.AddMenuItem("Rollback All", "Rollback all sessions (keep connections)")
+	mDisconnectAll := systray.AddMenuItem("Disconnect All", "Disconnect all clients and destroy sessions")
 	systray.AddSeparator()
 	mProxy := systray.AddMenuItem("PostgreSQL proxy: "+proxyAddr, "Address to use as host:port in your app")
 	mProxy.Disable()
@@ -56,7 +57,9 @@ func onReady(guiURL string) {
 
 	connectionLine := connectionString(proxyAddr)
 
-	rollbackAllURL := strings.TrimSuffix(guiURL, "/") + "/api/sessions/rollback-all"
+	baseAPI := strings.TrimSuffix(guiURL, "/")
+	rollbackAllURL := baseAPI + "/api/sessions/rollback-all"
+	disconnectAllURL := baseAPI + "/api/sessions/disconnect-all"
 	go func() {
 		for {
 			select {
@@ -64,6 +67,8 @@ func onReady(guiURL string) {
 				openBrowser(guiURL)
 			case <-mRollbackAll.ClickedCh:
 				_, _ = http.Post(rollbackAllURL, "application/json", nil)
+			case <-mDisconnectAll.ClickedCh:
+				_, _ = http.Post(disconnectAllURL, "application/json", nil)
 			case <-mCopy.ClickedCh:
 				copyToClipboard(connectionLine)
 			case <-mQuit.ClickedCh:

@@ -11,3 +11,5 @@ bin/
 opencode.json
 *.log
 *.bat
+*_debug_bin.exe*
+out.tst

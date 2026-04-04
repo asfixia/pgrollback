@@ -22,20 +22,32 @@ type ConnectionID = uintptr
 // ErrOnlyOneTransactionAtATime is returned when a second connection tries to BEGIN while another already has an open user transaction on the same session.
 var ErrOnlyOneTransactionAtATime = errors.New("only one transaction could start a transaction at a time on our pgrollback")
 
+// guiState holds GUI-observable session fields with its own RWMutex.
+// All methods are self-contained (acquire/release the lock internally),
+// so callers never need to worry about which lock to hold.
+// Safe to call while the parent realSessionDB.mu is held (lock ordering: mu → Gui.mu).
+type guiState struct {
+	mu           sync.RWMutex
+	queryHistory []QueryHistoryEntry
+	running      int
+}
+
 // realSessionDB encapsulates the PostgreSQL connection and its active transaction.
-// - The connection (conn) is only used for transaction control: Begin, Rollback base, Close, keepalive, advisory lock.
-// - All data operations (Query, Exec) go through the transaction so commands are never run outside the transaction.
 //
-// Callers use Query/Exec; the abstraction ensures the right object (tx) is used.
-// You cannot "get the transaction from Conn" in pgx—Conn.Begin() returns a Tx, so both are stored and managed here.
+// Lock design:
+//   - mu is the main lock: protects conn, tx, SavepointLevel, stopKeepalive, and serializes all SQL I/O.
+//   - Gui has its own RWMutex protecting GUI-observable fields (queryHistory, running)
+//     so GUI/status reads never block on running queries.
+//   - Lock ordering when both are needed: mu first, then Gui.mu. Never the reverse.
 type realSessionDB struct {
 	conn                 *pgx.Conn
 	tx                   pgx.Tx
-	mu                   sync.RWMutex // state + serializes SQL execution (Lock for SafeExec/SafeQuery/SafeExecTCL and PgConn().Exec)
+	mu                   sync.RWMutex // main lock: conn/tx state + serializes SQL I/O
+	Gui                  guiState     // GUI-observable state; see guiState doc
 	SavepointLevel       int
-	connectionWithOpenTx ConnectionID // which connection has the transaction; 0 when none
-	stopKeepalive func()
-	queryHistory  []QueryHistoryEntry // last N executed queries (oldest first), max maxQueryHistory
+	connectionWithOpenTx ConnectionID // which connection has the open user transaction; 0 when none (mu)
+	stopKeepalive        func()
+	ctx                  context.Context
 }
 
 func (d *realSessionDB) GetSavepointLevel() int {
@@ -46,7 +58,9 @@ func (d *realSessionDB) GetSavepointLevel() int {
 
 // GetSavepointName returns the name for the current savepoint level. Caller must hold d.mu when level may be changing.
 func (d *realSessionDB) GetSavepointName() string {
-	return fmt.Sprintf("pgrollback_v_%d", d.SavepointLevel)
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.getSavepointNameLocked()
 }
 
 // GetNextSavepointName returns the name for the next SAVEPOINT (current level + 1) without incrementing.
@@ -54,14 +68,14 @@ func (d *realSessionDB) GetSavepointName() string {
 func (d *realSessionDB) GetNextSavepointName() string {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	return fmt.Sprintf("pgrollback_v_%d", d.SavepointLevel+1)
+	return d.getNextSavepointNameLocked()
 }
 
 // IncrementSavepointLevel increments the savepoint level. Call only after a SAVEPOINT has been successfully executed.
 func (d *realSessionDB) IncrementSavepointLevel() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.SavepointLevel++
+	d.incrementSavepointLevelLocked()
 }
 
 // DecrementSavepointLevel decrements the savepoint level. Call only after a RELEASE SAVEPOINT or ROLLBACK TO SAVEPOINT has been successfully executed. No-op if level is already 0.
@@ -95,34 +109,43 @@ func (d *realSessionDB) incrementSavepointLevelLocked() {
 
 // LockRun holds d.mu for the duration of using the backend outside SafeExec/SafeQuery/SafeExecTCL (e.g. PgConn().Exec). Unlock with UnlockRun.
 func (d *realSessionDB) LockRun() {
-	d.mu.Lock()
+	GlobalLockTraceRegistry().LockRWMutex(&d.mu)
 }
 
 // UnlockRun releases d.mu held by LockRun.
 func (d *realSessionDB) UnlockRun() {
-	d.mu.Unlock()
+	GlobalLockTraceRegistry().UnlockRWMutex(&d.mu)
 }
 
 // execTxLocked runs a single SQL command on d.tx. Caller must hold d.mu (e.g. via LockRun).
 // Used to run SAVEPOINT/ROLLBACK TO SAVEPOINT/RELEASE SAVEPOINT around a batch without releasing the lock.
 func (d *realSessionDB) execTxLocked(ctx context.Context, sql string) (pgconn.CommandTag, error) {
-	if d.tx == nil {
+	if !d.hasActiveTransactionLocked() {
 		return pgconn.CommandTag{}, fmt.Errorf("no active transaction")
 	}
 	tag, err := d.tx.Exec(ctx, sql)
 	return tag, err
 }
 
-// hasOpenUserTransaction returns true when any connection has an open user transaction.
-// Caller must hold d.mu.
-func (d *realSessionDB) hasOpenUserTransaction() bool {
+// HasOpenUserTransaction returns true if a connection has started a user transaction (BEGIN)
+// and not yet committed or rolled back.
+func (d *realSessionDB) HasOpenUserTransaction() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	return d.connectionWithOpenTx != 0
 }
 
 // isTransactionHeldByOtherConnection returns true when a connection other than connID has the open transaction.
 // Caller must hold d.mu.
 func (d *realSessionDB) isTransactionHeldByOtherConnection(connID ConnectionID) bool {
-	return d.hasOpenUserTransaction() && d.connectionWithOpenTx != connID
+	d.mu.RLock()
+	answer := d.isTransactionHeldByOtherConnectionLocked(connID)
+	d.mu.RUnlock()
+	return answer
+}
+
+func (d *realSessionDB) isTransactionHeldByOtherConnectionLocked(connID ConnectionID) bool {
+	return d.connectionWithOpenTx != 0 && d.connectionWithOpenTx != connID
 }
 
 // IsUserBeginQuery returns true when the query is a user BEGIN (SAVEPOINT pgrollback_v_*).
@@ -151,13 +174,12 @@ func IsQueryThatAffectsClaim(query string) bool {
 }
 
 // ClaimOpenTransaction records that the given connection is starting a user transaction (BEGIN).
-// Call only when the query is a user BEGIN (e.g. when IsUserBeginQuery(query) or when applying side effects after executing SAVEPOINT in tests).
 // Nested BEGIN on the same connection is allowed; returns ErrOnlyOneTransactionAtATime only
 // when a different connection already has an open transaction.
 func (d *realSessionDB) ClaimOpenTransaction(connID ConnectionID) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.isTransactionHeldByOtherConnection(connID) {
+	if d.isTransactionHeldByOtherConnectionLocked(connID) {
 		return ErrOnlyOneTransactionAtATime
 	}
 	d.connectionWithOpenTx = connID
@@ -165,28 +187,28 @@ func (d *realSessionDB) ClaimOpenTransaction(connID ConnectionID) error {
 }
 
 // ReleaseOpenTransaction clears the "one connection has open transaction" flag when the
-// given connection is the one that had the claim. Call only when the claim should be released
-// (e.g. on disconnect, or when level drops to 0 after COMMIT/ROLLBACK, or on TCL failure when IsQueryThatAffectsClaim(query)).
+// given connection is the one that had the claim.
 func (d *realSessionDB) ReleaseOpenTransaction(connID ConnectionID) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.releaseOpenTransactionLocked(connID)
 }
 
+// releaseOpenTransactionLocked clears the claim. Caller must hold d.mu.
 func (d *realSessionDB) releaseOpenTransactionLocked(connID ConnectionID) {
 	if d.connectionWithOpenTx == connID {
 		d.connectionWithOpenTx = 0
 	}
 }
 
-// GetLastQuery returns the last executed query for this session (for GUI/status), derived from query history.
-func (d *realSessionDB) GetLastQuery() string {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	if len(d.queryHistory) == 0 {
+// GetLastQuery returns the last executed query for this session (for GUI/status).
+func (g *guiState) GetLastQuery() string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if len(g.queryHistory) == 0 {
 		return ""
 	}
-	return d.queryHistory[len(d.queryHistory)-1].Query
+	return g.queryHistory[len(g.queryHistory)-1].Query
 }
 
 // Ensure realSessionDB implements pgxQueryer (used by tx_guard).
@@ -207,20 +229,16 @@ func (d *realSessionDB) handleRollback(testID string) (string, error) {
 	defer d.mu.Unlock()
 
 	if d.SavepointLevel > 0 {
-		savepointName := d.GetSavepointName()
-		// Do not decrement here; level is decremented only when the command is successfully executed (in ApplyTCLSuccessTracking).
-		// Faz rollback até o savepoint e depois o remove (RELEASE)
+		savepointName := d.getSavepointNameLocked()
 		return fmt.Sprintf("ROLLBACK TO SAVEPOINT %s; RELEASE SAVEPOINT %s", savepointName, savepointName), nil
 	}
 
-	// Não há savepoints para reverter
-	// Retorna sucesso sem fazer nada (não há nada para reverter desta conexão)
 	return DEFAULT_SELECT_ONE, nil
 }
 
 func (d *realSessionDB) buildStatusResultSet(createdAt time.Time, testID string) (string, error) {
 	d.mu.RLock()
-	active := d.HasActiveTransaction()
+	active := d.hasActiveTransactionLocked()
 	level := d.SavepointLevel
 	d.mu.RUnlock()
 
@@ -233,12 +251,11 @@ func (d *realSessionDB) buildStatusResultSet(createdAt time.Time, testID string)
 // Query runs a query in the current transaction. Returns an error if there is no active transaction.
 func (d *realSessionDB) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
 	d.mu.RLock()
-	tx := d.tx
 	defer d.mu.RUnlock()
-	if tx == nil {
+	if !d.hasActiveTransactionLocked() {
 		return nil, fmt.Errorf("no active transaction: use BeginTx first")
 	}
-	return tx.Query(ctx, sql, args...)
+	return d.tx.Query(ctx, sql, args...)
 }
 
 func (d *realSessionDB) handleCommit(testID string) (string, error) {
@@ -246,8 +263,7 @@ func (d *realSessionDB) handleCommit(testID string) (string, error) {
 	defer d.mu.Unlock()
 
 	if d.SavepointLevel > 0 {
-		savepointName := d.GetSavepointName()
-		// Do not decrement here; level is decremented only when the command is successfully executed (in ApplyTCLSuccessTracking).
+		savepointName := d.getSavepointNameLocked()
 		return fmt.Sprintf("RELEASE SAVEPOINT %s", savepointName), nil
 	}
 
@@ -259,26 +275,18 @@ func (d *realSessionDB) handleBegin(testID string, connID ConnectionID) (string,
 		return "", fmt.Errorf("no active transaction: use BeginTx first")
 	}
 
-	// When connID is set (proxy path), fail if another connection already has an open user transaction.
 	if connID != 0 {
-		d.mu.Lock()
 		heldByOther := d.isTransactionHeldByOtherConnection(connID)
-		d.mu.Unlock()
 		if heldByOther {
 			return "", ErrOnlyOneTransactionAtATime
 		}
 	}
 
-	// Garantia de segurança: se não houver transação base, cria uma primeiro
-	// Isso pode acontecer se a transação foi commitada/rollback mas a sessão ainda existe
-	// Em testes unitários (session.DB == nil ou conn nil), BeginTx é no-op
-	if err := d.beginTx(context.Background()); err != nil {
+	if err := d.beginTx(d.contextOrBackground()); err != nil {
 		return "", fmt.Errorf("Failed to Begin a transaction: %w", err)
 	}
 
-	// Single logical level: only the first BEGIN creates a savepoint. Further BEGINs are no-ops (no error).
-	// COMMIT/ROLLBACK when level > 0 are "real"; when level is 0 they return success without doing anything.
-	if d.SavepointLevel >= 1 {
+	if d.GetSavepointLevel() >= 1 {
 		return DEFAULT_SELECT_ONE, nil
 	}
 	// Return the next savepoint name without incrementing; level is incremented only when the SAVEPOINT is successfully executed (in query_handler).
@@ -289,13 +297,12 @@ func (d *realSessionDB) handleBegin(testID string, connID ConnectionID) (string,
 // Exec runs a command in the current transaction. Returns an error if there is no active transaction.
 func (d *realSessionDB) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	d.mu.RLock()
-	tx := d.tx
 	defer d.mu.RUnlock()
-	if tx == nil {
+	if !d.hasActiveTransactionLocked() {
 		var zero pgconn.CommandTag
 		return zero, fmt.Errorf("no active transaction: use BeginTx first")
 	}
-	return tx.Exec(ctx, sql, args...)
+	return d.tx.Exec(ctx, sql, args...)
 }
 
 // Danilo isso aqui é só pra ser usado no savepoint (o commit nele é tratado como releasepoint)
@@ -310,6 +317,8 @@ func commitSavePoint(ctx context.Context, savepoint pgx.Tx) {
 }
 
 func (d *realSessionDB) SafeQuery(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	d.Gui.incRunningQueryCount()
+	defer d.Gui.decRunningQueryCount()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	savePoint, err := d.tx.Begin(ctx)
@@ -342,6 +351,8 @@ func (d *realSessionDB) SafeQuery(ctx context.Context, sql string, args ...any) 
 }
 
 func (d *realSessionDB) SafeExec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	d.Gui.incRunningQueryCount()
+	defer d.Gui.decRunningQueryCount()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	savePoint, execErr := d.tx.Begin(ctx)
@@ -374,6 +385,8 @@ func (d *realSessionDB) SafeExec(ctx context.Context, sql string, args ...any) (
 // must run on the main tx so the created savepoint is visible for later ROLLBACK/RELEASE;
 // RELEASE and ROLLBACK run inside a guard so a failure does not abort the main transaction.
 func (d *realSessionDB) SafeExecTCL(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	d.Gui.incRunningQueryCount()
+	defer d.Gui.decRunningQueryCount()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if isSavepointCommand(sql) {
@@ -438,22 +451,21 @@ func (d *realSessionDB) RollbackUserSavepointsOnDisconnect(ctx context.Context, 
 	if count <= 0 {
 		return nil
 	}
-	for i := 0; i < count; i++ {
-		d.mu.Lock()
-		if d.SavepointLevel <= 0 {
-			d.mu.Unlock()
-			break
-		}
-		name := fmt.Sprintf("pgrollback_v_%d", d.SavepointLevel)
-		d.SavepointLevel--
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	qntToRollback := min(d.SavepointLevel, count)
+	if qntToRollback <= 0 {
 		d.mu.Unlock()
-
-		sql := fmt.Sprintf("ROLLBACK TO SAVEPOINT %s; RELEASE SAVEPOINT %s", name, name)
-		if _, err := d.SafeExecTCL(ctx, sql); err != nil {
-			logIfVerbose("[PROXY] RollbackUserSavepointsOnDisconnect: %v", err)
-			return err
-		}
+		return nil
 	}
+	newSpQnt := d.SavepointLevel - qntToRollback
+	spName := fmt.Sprintf("pgrollback_v_%d", newSpQnt)
+	sql := fmt.Sprintf("ROLLBACK TO SAVEPOINT %s; RELEASE SAVEPOINT %s", spName, spName)
+	if _, err := d.SafeExecTCL(ctx, sql); err != nil {
+		logIfVerbose("[PROXY] RollbackUserSavepointsOnDisconnect: %v", err)
+		return err
+	}
+	d.SavepointLevel = newSpQnt
 	return nil
 }
 
@@ -462,15 +474,11 @@ func (d *realSessionDB) RollbackUserSavepointsOnDisconnect(ctx context.Context, 
 func (d *realSessionDB) HasActiveTransaction() bool {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	return d.tx != nil
+	return d.hasActiveTransactionLocked()
 }
 
-// HasOpenUserTransaction returns true if a connection has started a user transaction (BEGIN)
-// and not yet committed or rolled back. Use this for GUI/status to show "user tx open" vs internal state.
-func (d *realSessionDB) HasOpenUserTransaction() bool {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.connectionWithOpenTx != 0
+func (d *realSessionDB) hasActiveTransactionLocked() bool {
+	return d.tx != nil
 }
 
 // beginTx starts a new transaction on the connection. Idempotent if already in a transaction (no-op).
@@ -478,16 +486,16 @@ func (d *realSessionDB) beginTx(ctx context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.conn == nil {
-		return nil // unit test: no real connection
+		return nil
 	}
-	if d.tx != nil {
-		return nil // already in a transaction
+	if d.hasActiveTransactionLocked() {
+		return nil
 	}
-	tx, err := d.conn.Begin(ctx)
+	newTx, err := d.conn.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
-	d.tx = tx
+	d.tx = newTx
 	return nil
 }
 
@@ -495,7 +503,7 @@ func (d *realSessionDB) beginTx(ctx context.Context) error {
 func (d *realSessionDB) rollbackTx(ctx context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.tx == nil {
+	if !d.hasActiveTransactionLocked() {
 		return nil
 	}
 	err := d.tx.Rollback(ctx)
@@ -508,47 +516,53 @@ func (d *realSessionDB) rollbackTx(ctx context.Context) error {
 func (d *realSessionDB) startNewTx(ctx context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.conn.PgConn().SyncConn(ctx)
 	if d.conn == nil {
 		return nil
 	}
-	if d.tx != nil {
-		err := d.tx.Rollback(ctx)
-		if err != nil {
+	d.conn.PgConn().SyncConn(ctx)
+	if d.hasActiveTransactionLocked() {
+		if err := d.tx.Rollback(ctx); err != nil {
 			logIfVerbose("Failed to rollback on starting a new Tx: %s", err)
 		}
-		d.tx = nil
 	}
 	_, err := d.conn.Exec(ctx, "ROLLBACK")
 	if err != nil {
 		return err
 	}
-	tx, err := d.conn.Begin(ctx)
+	newTx, err := d.conn.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin new transaction: %w", err)
 	}
-	d.tx = tx
+	d.tx = newTx
 	return nil
+}
+
+// stopKeepaliveUnlocked clears the keepalive callback under a brief lock, then invokes it
+// without holding d.mu. The keepalive goroutine acquires mu for Ping; waiting for it to exit
+// while holding mu would deadlock with that goroutine.
+func (d *realSessionDB) stopKeepaliveLocked() {
+	stopFn := d.stopKeepalive
+	d.stopKeepalive = nil
+	if stopFn != nil {
+		stopFn()
+	}
 }
 
 // close rolls back the current transaction (if any), stops keepalive, and closes the connection.
 func (d *realSessionDB) close(ctx context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.queryHistory = nil
-	if d.stopKeepalive != nil {
-		d.stopKeepalive()
-		d.stopKeepalive = nil
+	d.stopKeepaliveLocked()
+
+	d.Gui.ClearQueryHistory()
+
+	if d.conn == nil {
+		return nil
 	}
-	if d.tx != nil {
-		_ = d.tx.Rollback(ctx)
-		d.tx = nil
+	if err := d.conn.Close(ctx); err != nil {
+		return fmt.Errorf("failed to close connection: %w", err)
 	}
-	if d.conn != nil {
-		err := d.conn.Close(ctx)
-		d.conn = nil
-		return err
-	}
+	d.conn = nil
 	return nil
 }
 
@@ -570,11 +584,7 @@ func (d *realSessionDB) startKeepalive(interval time.Duration) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				pingCtx, pingCancel := context.WithTimeout(context.Background(), 20*time.Second)
-				d.mu.Lock()
-				_ = d.conn.Ping(pingCtx)
-				d.mu.Unlock()
-				pingCancel()
+				d.pingKeepaliveOnce()
 			}
 		}
 	}()
@@ -584,7 +594,19 @@ func (d *realSessionDB) startKeepalive(interval time.Duration) {
 	}
 }
 
-// acquireAdvisoryLock runs pg_advisory_lock on the connection (outside tx, for session-level locking).
+func (d *realSessionDB) pingKeepaliveOnce() {
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	d.mu.Lock()
+	if d.conn != nil {
+		_ = d.conn.Ping(pingCtx)
+	}
+	d.mu.Unlock()
+	pingCancel()
+}
+
+// acquireAdvisoryLock runs pg_advisory_lock on the connection.
+// Does not hold d.mu during the blocking pg_advisory_lock call (can wait for other sessions);
+// SafeExec and other paths can still take d.mu without being starved.
 func (d *realSessionDB) acquireAdvisoryLock(ctx context.Context, lockKey int64) error {
 	d.mu.RLock()
 	conn := d.conn
@@ -596,7 +618,7 @@ func (d *realSessionDB) acquireAdvisoryLock(ctx context.Context, lockKey int64) 
 	return err
 }
 
-// releaseAdvisoryLock runs pg_advisory_unlock on the connection (outside tx).
+// releaseAdvisoryLock runs pg_advisory_unlock on the connection.
 func (d *realSessionDB) releaseAdvisoryLock(ctx context.Context, lockKey int64) error {
 	d.mu.RLock()
 	conn := d.conn
@@ -613,6 +635,10 @@ func (d *realSessionDB) releaseAdvisoryLock(ctx context.Context, lockKey int64) 
 func (d *realSessionDB) PgConn() *pgconn.PgConn {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
+	return d.PgConnLocked()
+}
+
+func (d *realSessionDB) PgConnLocked() *pgconn.PgConn {
 	if d.conn == nil {
 		return nil
 	}
@@ -628,10 +654,40 @@ func (d *realSessionDB) Tx() pgx.Tx {
 }
 
 // newSessionDB creates a realSessionDB with the given connection and transaction (caller must have begun tx on conn).
-func newSessionDB(conn *pgx.Conn, tx pgx.Tx) *realSessionDB {
+func newSessionDB(conn *pgx.Conn, tx pgx.Tx, ctx context.Context) *realSessionDB {
 	d := &realSessionDB{
 		conn: conn,
 		tx:   tx,
+		ctx:  ctx,
 	}
 	return d
+}
+
+// contextOrBackground returns the session context when set, otherwise context.Background().
+func (d *realSessionDB) contextOrBackground() context.Context {
+	if d == nil || d.ctx == nil {
+		return context.Background()
+	}
+	return d.ctx
+}
+
+func (g *guiState) incRunningQueryCount() {
+	g.mu.Lock()
+	g.running++
+	g.mu.Unlock()
+}
+
+func (g *guiState) decRunningQueryCount() {
+	g.mu.Lock()
+	if g.running > 0 {
+		g.running--
+	}
+	g.mu.Unlock()
+}
+
+// HasRunningQuery reports whether there is at least one query in flight on this session.
+func (g *guiState) HasRunningQuery() bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.running > 0
 }

@@ -73,6 +73,15 @@ const htmlTemplate = `<!DOCTYPE html>
       color: #fff;
     }
     .toolbar .rollback-all-btn:hover { background: #dc2626; }
+    .toolbar .disconnect-all-btn {
+      background: transparent;
+      color: #fca5a5;
+      border: 1px solid #b91c1c;
+    }
+    .toolbar .disconnect-all-btn:hover {
+      background: rgba(185, 28, 28, 0.15);
+      color: #fecaca;
+    }
     .table-wrap {
       background: rgba(30, 41, 59, 0.85);
       border-radius: 12px;
@@ -279,6 +288,7 @@ const htmlTemplate = `<!DOCTYPE html>
       <div class="toolbar">
         <button type="button" id="refresh">Refresh</button>
         <button type="button" id="rollbackAllBtn" class="rollback-all-btn">Rollback All</button>
+        <button type="button" id="disconnectAllBtn" class="disconnect-all-btn">Disconnect All</button>
         <button type="button" class="settings-btn" id="settingsBtn">Settings</button>
       </div>
     </header>
@@ -351,6 +361,29 @@ const htmlTemplate = `<!DOCTYPE html>
         return isNaN(d.getTime()) ? at : d.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'medium' });
       } catch (e) { return at; }
     }
+    function formatDuration(raw) {
+      if (!raw || typeof raw !== 'string') return raw;
+      var s = raw.trim();
+      if (!s) return s;
+      var m = s.match(/^([\d.]+)\s*([a-zA-Zµμ]*)$/);
+      if (!m) return s;
+      var v = parseFloat(m[1]);
+      if (!isFinite(v)) return s;
+      var unit = m[2] || '';
+      var abs = Math.abs(v);
+      var digits = abs === 0 ? 1 : Math.floor(Math.log10(abs)) + 1;
+      var decimals = 0;
+      if (digits < 3) {
+        decimals = 3 - digits;
+      }
+      var factor = Math.pow(10, decimals);
+      var rounded = Math.round(v * factor) / factor;
+      var numStr = decimals > 0 ? rounded.toFixed(decimals) : String(Math.round(rounded));
+      if (numStr.indexOf('.') !== -1) {
+        numStr = numStr.replace(/\.0+$/, '').replace(/(\.\d)0+$/, '$1');
+      }
+      return numStr + unit;
+    }
     function prettySql(sql) {
       if (!sql || typeof sql !== 'string') return sql;
       var s = sql.trim();
@@ -365,7 +398,8 @@ const htmlTemplate = `<!DOCTYPE html>
       if (item && typeof item === 'object' && item.query !== undefined) {
         query = item.query || '';
         at = item.at ? '<span class="qtime">' + escapeHtml(formatHistoryAt(item.at)) + '</span>' : '';
-        dur = (item.duration && item.duration.trim()) ? ' <span class="query-duration">(' + escapeHtml(item.duration) + ')</span>' : '';
+        var d = formatDuration(item.duration);
+        dur = (d && d.trim()) ? ' <span class="query-duration">(' + escapeHtml(d) + ')</span>' : '';
       } else {
         query = typeof item === 'string' ? item : '';
       }
@@ -385,7 +419,8 @@ const htmlTemplate = `<!DOCTYPE html>
       sessions.forEach(function(s) {
         var q = escapeHtml(s.last_query || '');
         var qTitle = (s.last_query || '');
-        var dur = (s.last_query_duration && s.last_query_duration.trim()) ? (' <span class="query-duration">(' + escapeHtml(s.last_query_duration) + ')</span>') : '';
+        var d = formatDuration(s.last_query_duration);
+        var dur = (d && d.trim()) ? (' <span class="query-duration">(' + escapeHtml(d) + ')</span>') : '';
         var hist = s.query_history || [];
         var n = hist.length;
         var txLabel = (s.in_transaction === true) ? 'Yes' : 'No';
@@ -524,6 +559,16 @@ const htmlTemplate = `<!DOCTYPE html>
           .then(function(r) { if (!r.ok) throw new Error(r.statusText); return r.json(); })
           .then(function() { load(); })
           .catch(function(e) { alert('Rollback All failed: ' + (e && e.message ? e.message : e)); });
+      });
+    }
+    var disconnectAllBtn = document.getElementById('disconnectAllBtn');
+    if (disconnectAllBtn) {
+      disconnectAllBtn.addEventListener('click', function() {
+        if (!confirm('Disconnect ALL sessions? This will close all connections and rollback their transactions.')) return;
+        fetch('__API_BASE__/sessions/disconnect-all', { method: 'POST' })
+          .then(function(r) { if (!r.ok) throw new Error(r.statusText); return r.json(); })
+          .then(function() { load(); })
+          .catch(function(e) { alert('Disconnect All failed: ' + (e && e.message ? e.message : e)); });
       });
     }
     load();

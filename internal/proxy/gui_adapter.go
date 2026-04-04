@@ -23,8 +23,8 @@ func (a *sessionProviderAdapter) GetSessions() []gui.SessionInfo {
 		lastQueryDuration := session.GetLastQueryDuration()
 		if session.DB != nil {
 			inTransaction = session.DB.HasOpenUserTransaction()
-			lastQuery = session.DB.GetLastQuery()
-			entries := session.DB.GetQueryHistory()
+			lastQuery = session.DB.Gui.GetLastQuery()
+			entries := session.DB.Gui.GetQueryHistory()
 			queryHistory = make([]gui.QueryHistoryItem, len(entries))
 			for i, e := range entries {
 				queryHistory[i] = gui.QueryHistoryItem{Query: e.Query, At: e.At.Format(time.RFC3339), Duration: e.Duration}
@@ -51,7 +51,7 @@ func (a *sessionProviderAdapter) ClearHistory(testID string) error {
 		return fmt.Errorf("session not found")
 	}
 	if session.DB != nil {
-		session.DB.ClearQueryHistory()
+		session.DB.Gui.ClearQueryHistory()
 	}
 	return nil
 }
@@ -59,7 +59,8 @@ func (a *sessionProviderAdapter) ClearHistory(testID string) error {
 func (a *sessionProviderAdapter) DestroyAllSessions() (int, error) {
 	sessions := a.s.PgRollback.GetAllSessions()
 	n := 0
-	for testID := range sessions {
+	for testID, session := range sessions {
+		session.Cancel() // unblock any in-flight query so DestroySession can acquire locks
 		if err := a.s.PgRollback.DestroySession(testID); err != nil {
 			return n, err
 		}

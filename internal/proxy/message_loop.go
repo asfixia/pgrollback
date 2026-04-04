@@ -11,6 +11,7 @@ import (
 
 	pg_query "github.com/pganalyze/pg_query_go/v5"
 
+	"pgrollback/pkg/logger"
 	"pgrollback/pkg/protocol"
 	"pgrollback/pkg/sql"
 
@@ -138,13 +139,36 @@ func (p *proxyConnection) executeViaExecPrepared(ctx context.Context, pgConn *pg
 // We run deallocate first (it holds the session lock for the whole DEALLOCATE batch) so that
 // any other connection (e.g. conn2 polling prepared-statement count) is blocked until
 // statements are deallocated; then we run rollback/release (which take the lock briefly).
+func (p *proxyConnection) destroySessionIfRequested(testID string) bool {
+	remoteAddr := p.clientConn.RemoteAddr().String()
+	p.server.PgRollback.mu.Lock()
+	defer p.server.PgRollback.mu.Unlock()
+	session := p.server.PgRollback.GetSessionLocked(testID)
+	if session == nil {
+		return false
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.ShouldDisconnectOnCleanupLocked() {
+		log.Printf("[PROXY] destroy session on disconnect (testID=%s, conn=%s)", testID, remoteAddr)
+		session.CancelLocked() // unblock any in-flight query so DestroySession can acquire locks
+		if err := p.server.PgRollback.DestroySessionLocked(testID, session); err != nil {
+			log.Printf("[PROXY] error destroying session on disconnect (testID=%s, conn=%s): %v", testID, remoteAddr, err)
+		}
+		return true
+	}
+	return false
+}
+
 func (p *proxyConnection) runDisconnectCleanup(testID string) {
 	remoteAddr := p.clientConn.RemoteAddr().String()
 	log.Printf("[PROXY] disconnect cleanup starting (testID=%s, conn=%s)", testID, remoteAddr)
 	p.deallocateBackendStatementsOnDisconnect(testID)
 	p.rollbackUserSavepointsOnDisconnect(testID)
 	p.releaseOpenTransactionOnDisconnect(testID)
-	log.Printf("[PROXY] disconnect cleanup done (testID=%s, conn=%s)", testID, remoteAddr)
+	if !p.destroySessionIfRequested(testID) {
+		log.Printf("[PROXY] disconnect cleanup done (testID=%s, conn=%s)", testID, remoteAddr)
+	}
 }
 
 // RunMessageLoop é o loop principal que processa as mensagens do cliente.
@@ -166,36 +190,47 @@ func (p *proxyConnection) RunMessageLoop(testID string) {
 
 		switch msg := msg.(type) {
 		case *pgproto3.Query:
+			logger.Debug("[PROXY-ML] Query recebido: %s", msg.String)
 			p.handleMessageQuery(testID, msg)
 
 		case *pgproto3.Parse:
+			logger.Debug("[PROXY-ML] Parse recebido: %s", msg.Query)
 			p.handleMessageParse(testID, msg)
 
 		case *pgproto3.Bind:
+			logger.Debug("[PROXY-ML] Bind recebido: %s", msg.PreparedStatement)
 			p.handleMessageBind(msg)
 
 		case *pgproto3.Execute:
+			logger.Debug("[PROXY-ML] Execute recebido: %s", msg.Portal)
 			p.handleMessageExecute(testID, msg)
 
 		case *pgproto3.Describe:
+			logger.Debug("[PROXY-ML] Describe recebido: %s", msg.Name)
 			p.handleMessageDescribe(msg)
 
 		case *pgproto3.Sync:
+			logger.Debug("[PROXY-ML] Sync recebido")
 			p.handleMessageSync()
 
 		case *pgproto3.Terminate:
+			logger.Debug("[PROXY-ML] Terminate recebido")
 			return
 
 		case *pgproto3.Flush:
+			logger.Debug("[PROXY-ML] Flush recebido")
 			p.handleMessageFlush(testID)
 
 		case *pgproto3.Close:
+			logger.Debug("[PROXY-ML] Close recebido: %s", msg.Name)
 			p.handleMessageClose(testID, msg)
 
 		case *pgproto3.CopyData:
+			logger.Debug("[PROXY-ML] CopyData recebido")
 			p.handleMessageCopyData(testID)
 
 		default:
+			logger.Warn("[PROXY-ML] Mensagem desconhecida recebida: %T", msg)
 			p.handleMessageDefault(testID, msg)
 		}
 	}
@@ -224,7 +259,7 @@ func (p *proxyConnection) handleMessageClose(testID string, msg *pgproto3.Close)
 		if msg.ObjectType == 'S' && pgConn != nil && !p.IsMultiStatement(msg.Name) {
 			backendName := p.backendStmtName(msg.Name)
 			session.DB.LockRun()
-			if err := pgConn.Deallocate(context.Background(), backendName); err != nil {
+			if err := pgConn.Deallocate(session.Context(), backendName); err != nil {
 				log.Printf("[PROXY] Deallocate failed: %v", err)
 			}
 			session.DB.UnlockRun()
@@ -328,11 +363,11 @@ func (p *proxyConnection) handleMessageExecute(testID string, msg *pgproto3.Exec
 	backendStmtName := p.backendStmtName(stmtName)
 	session.DB.LockRun()
 	start := time.Now()
-	err := p.executeViaExecPrepared(context.Background(), pgConn, backendStmtName, params, formatCodes, resultFormats)
+	err := p.executeViaExecPrepared(session.Context(), pgConn, backendStmtName, params, formatCodes, resultFormats)
 	elapsed := time.Since(start)
 	session.DB.UnlockRun()
 	if session.DB != nil {
-		session.DB.UpdateLastQueryHistoryDuration(elapsed)
+		session.DB.Gui.UpdateLastQueryHistoryDuration(elapsed)
 	}
 	if err != nil {
 		log.Printf("[PROXY] ExecPrepared failed: %v", err)
@@ -378,29 +413,30 @@ func (p *proxyConnection) handleMessageParse(testID string, msg *pgproto3.Parse)
 		return
 	}
 	backendName := p.backendStmtName(msg.Name)
+	session.DB.LockRun()
+	defer session.DB.UnlockRun()
 	var existingSD *pgconn.StatementDescription
 	if msg.Name != "" {
-		existingSD = p.GetStatementDescription(msg.Name)
+		existingSD = p.GetStatementDescriptionLocked(msg.Name)
 	}
-	pgConn := session.DB.PgConn()
+	pgConn := session.DB.PgConnLocked()
 	var sd *pgconn.StatementDescription
 	var prepErr error
-	session.DB.LockRun()
+	ctx := session.Context()
 	if msg.Name != "" && existingSD != nil && pgConn != nil {
-		_ = pgConn.Deallocate(context.Background(), backendName)
+		_ = pgConn.Deallocate(ctx, backendName)
 	}
 	if pgConn != nil {
-		sd, prepErr = pgConn.Prepare(context.Background(), backendName, interceptedQuery, msg.ParameterOIDs)
+		sd, prepErr = pgConn.Prepare(ctx, backendName, interceptedQuery, msg.ParameterOIDs)
 	} else {
 		prepErr = fmt.Errorf("conexão backend indisponível")
 	}
-	session.DB.UnlockRun()
 	if prepErr != nil {
 		log.Printf("[PROXY] Prepare failed: %v", prepErr)
 		p.SendErrorResponse(prepErr)
 		return
 	}
-	p.SetStatementDescription(msg.Name, sd)
+	p.SetStatementDescriptionLocked(msg.Name, sd)
 	p.backend.Send(&pgproto3.ParseComplete{})
 	p.backend.Flush()
 }
@@ -429,7 +465,7 @@ func (p *proxyConnection) handleMessageQuery(testID string, msg *pgproto3.Query)
 	} else {
 		elapsed := time.Since(start)
 		if session := p.server.PgRollback.GetSession(testID); session != nil && session.DB != nil {
-			session.DB.UpdateLastQueryHistoryDuration(elapsed)
+			session.DB.Gui.UpdateLastQueryHistoryDuration(elapsed)
 		}
 		log.Printf("[PROXY] Query Simples processada com sucesso: %s", queryStr)
 	}
@@ -449,11 +485,11 @@ func (p *proxyConnection) ProcessSimpleQuery(testID string, query string) error 
 	}
 
 	if interceptedQuery == FULLROLLBACK_SENTINEL && session.DB != nil {
-		session.DB.ClearLastQuery()
+		session.DB.Gui.ClearLastQuery()
 	}
 	// Se a interceptação "engoliu" a query (retornou vazia ou marcador), apenas finalizamos.
 	// Isso acontece com comandos pgrollback internos ou quando queremos silenciar uma query.
-	if interceptedQuery == "" || interceptedQuery == FULLROLLBACK_SENTINEL {
+	if interceptedQuery == "" || interceptedQuery == FULLROLLBACK_SENTINEL || interceptedQuery == DISCONNECT_SENTINEL {
 		if os.Getenv("PGROLLBACK_LOG_MESSAGE_ORDER") == "1" {
 			log.Printf("[MSG_ORDER] SEND CommandComplete: SELECT (intercepted)")
 			log.Printf("[MSG_ORDER] SEND ReadyForQuery")

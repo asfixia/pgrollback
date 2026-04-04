@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -9,7 +10,7 @@ import (
 
 // newTestSessionDB returns a realSessionDB with no real connection (nil conn/tx), suitable for query history unit tests.
 func newTestSessionDB() *realSessionDB {
-	return newSessionDB(nil, nil)
+	return newSessionDB(nil, nil, context.Background())
 }
 
 // --- isInternalNoiseQuery ---
@@ -84,20 +85,20 @@ func TestIsInternalNoiseQuery_RegularQueries(t *testing.T) {
 
 func TestSetLastQuery_Basic(t *testing.T) {
 	db := newTestSessionDB()
-	db.SetLastQuery("SELECT 1")
-	if got := db.GetLastQuery(); got != "SELECT 1" {
+	db.Gui.SetLastQuery("SELECT 1")
+	if got := db.Gui.GetLastQuery(); got != "SELECT 1" {
 		t.Errorf("GetLastQuery() = %q, want %q", got, "SELECT 1")
 	}
 }
 
 func TestSetLastQuery_SkipsNoise(t *testing.T) {
 	db := newTestSessionDB()
-	db.SetLastQuery("SELECT 1")
-	db.SetLastQuery("DEALLOCATE pdo_stmt_00000001")
-	if got := db.GetLastQuery(); got != "SELECT 1" {
+	db.Gui.SetLastQuery("SELECT 1")
+	db.Gui.SetLastQuery("DEALLOCATE pdo_stmt_00000001")
+	if got := db.Gui.GetLastQuery(); got != "SELECT 1" {
 		t.Errorf("after noise, GetLastQuery() = %q, want %q", got, "SELECT 1")
 	}
-	hist := db.GetQueryHistory()
+	hist := db.Gui.GetQueryHistory()
 	if len(hist) != 1 {
 		t.Errorf("history len = %d, want 1", len(hist))
 	}
@@ -105,9 +106,9 @@ func TestSetLastQuery_SkipsNoise(t *testing.T) {
 
 func TestSetLastQuery_SkipsEmpty(t *testing.T) {
 	db := newTestSessionDB()
-	db.SetLastQuery("SELECT 1")
-	db.SetLastQuery("")
-	if got := db.GetLastQuery(); got != "SELECT 1" {
+	db.Gui.SetLastQuery("SELECT 1")
+	db.Gui.SetLastQuery("")
+	if got := db.Gui.GetLastQuery(); got != "SELECT 1" {
 		t.Errorf("after empty, GetLastQuery() = %q, want %q", got, "SELECT 1")
 	}
 }
@@ -118,10 +119,10 @@ func TestQueryHistory_ExecutionOrder(t *testing.T) {
 	db := newTestSessionDB()
 	queries := []string{"SELECT 1", "SELECT 2", "SELECT 3", "SELECT 4", "SELECT 5"}
 	for _, q := range queries {
-		db.SetLastQuery(q)
+		db.Gui.SetLastQuery(q)
 		time.Sleep(time.Millisecond) // ensure timestamps differ
 	}
-	hist := db.GetQueryHistory()
+	hist := db.Gui.GetQueryHistory()
 	if len(hist) != len(queries) {
 		t.Fatalf("history len = %d, want %d", len(hist), len(queries))
 	}
@@ -141,9 +142,9 @@ func TestQueryHistory_ExecutionOrder(t *testing.T) {
 func TestQueryHistory_HasTimestamp(t *testing.T) {
 	db := newTestSessionDB()
 	before := time.Now()
-	db.SetLastQuery("SELECT 1")
+	db.Gui.SetLastQuery("SELECT 1")
 	after := time.Now()
-	hist := db.GetQueryHistory()
+	hist := db.Gui.GetQueryHistory()
 	if len(hist) != 1 {
 		t.Fatalf("history len = %d, want 1", len(hist))
 	}
@@ -157,9 +158,9 @@ func TestQueryHistory_HasTimestamp(t *testing.T) {
 func TestQueryHistory_MaxLimit(t *testing.T) {
 	db := newTestSessionDB()
 	for i := 0; i < maxQueryHistory+20; i++ {
-		db.SetLastQuery("SELECT " + time.Now().String())
+		db.Gui.SetLastQuery("SELECT " + time.Now().String())
 	}
-	hist := db.GetQueryHistory()
+	hist := db.Gui.GetQueryHistory()
 	if len(hist) != maxQueryHistory {
 		t.Errorf("history len = %d, want %d (max)", len(hist), maxQueryHistory)
 	}
@@ -168,11 +169,10 @@ func TestQueryHistory_MaxLimit(t *testing.T) {
 func TestQueryHistory_MaxPreservesNewest(t *testing.T) {
 	db := newTestSessionDB()
 	for i := 0; i < maxQueryHistory+5; i++ {
-		db.SetLastQuery("Q" + time.Now().String())
+		db.Gui.SetLastQuery("Q" + time.Now().String())
 	}
-	// Add a known query at the end
-	db.SetLastQuery("LAST_QUERY")
-	hist := db.GetQueryHistory()
+	db.Gui.SetLastQuery("LAST_QUERY")
+	hist := db.Gui.GetQueryHistory()
 	last := hist[len(hist)-1]
 	if last.Query != "LAST_QUERY" {
 		t.Errorf("last entry = %q, want %q", last.Query, "LAST_QUERY")
@@ -183,13 +183,13 @@ func TestQueryHistory_MaxPreservesNewest(t *testing.T) {
 
 func TestClearQueryHistory(t *testing.T) {
 	db := newTestSessionDB()
-	db.SetLastQuery("SELECT 1")
-	db.SetLastQuery("SELECT 2")
-	db.ClearQueryHistory()
-	if got := db.GetLastQuery(); got != "" {
+	db.Gui.SetLastQuery("SELECT 1")
+	db.Gui.SetLastQuery("SELECT 2")
+	db.Gui.ClearQueryHistory()
+	if got := db.Gui.GetLastQuery(); got != "" {
 		t.Errorf("after clear, GetLastQuery() = %q, want empty", got)
 	}
-	hist := db.GetQueryHistory()
+	hist := db.Gui.GetQueryHistory()
 	if hist != nil {
 		t.Errorf("after clear, GetQueryHistory() = %v, want nil", hist)
 	}
@@ -197,13 +197,12 @@ func TestClearQueryHistory(t *testing.T) {
 
 func TestClearLastQuery(t *testing.T) {
 	db := newTestSessionDB()
-	db.SetLastQuery("SELECT 1")
-	db.ClearLastQuery()
-	if got := db.GetLastQuery(); got != "" {
+	db.Gui.SetLastQuery("SELECT 1")
+	db.Gui.ClearLastQuery()
+	if got := db.Gui.GetLastQuery(); got != "" {
 		t.Errorf("after ClearLastQuery, got = %q, want empty", got)
 	}
-	// Last entry was removed from history (last query is derived from history)
-	hist := db.GetQueryHistory()
+	hist := db.Gui.GetQueryHistory()
 	if len(hist) != 0 {
 		t.Errorf("history len = %d, want 0 after ClearLastQuery", len(hist))
 	}
@@ -213,10 +212,10 @@ func TestClearLastQuery(t *testing.T) {
 
 func TestQueryHistory_ReturnsCopy(t *testing.T) {
 	db := newTestSessionDB()
-	db.SetLastQuery("SELECT 1")
-	hist1 := db.GetQueryHistory()
+	db.Gui.SetLastQuery("SELECT 1")
+	hist1 := db.Gui.GetQueryHistory()
 	hist1[0].Query = "MODIFIED"
-	hist2 := db.GetQueryHistory()
+	hist2 := db.Gui.GetQueryHistory()
 	if hist2[0].Query == "MODIFIED" {
 		t.Error("modifying returned slice should not affect internal state")
 	}
@@ -265,7 +264,7 @@ func TestSubstituteParams_NoArgs(t *testing.T) {
 func TestSetLastQueryWithParams_Substitutes(t *testing.T) {
 	db := newTestSessionDB()
 	db.SetLastQueryWithParams("UPDATE foo SET bar = $1 WHERE id = $2", []any{"value", int32(123)}, "")
-	got := db.GetLastQuery()
+	got := db.Gui.GetLastQuery()
 	want := "UPDATE foo SET bar = 'value' WHERE id = 123"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -275,7 +274,7 @@ func TestSetLastQueryWithParams_Substitutes(t *testing.T) {
 func TestSetLastQueryWithParams_NoArgs(t *testing.T) {
 	db := newTestSessionDB()
 	db.SetLastQueryWithParams("SELECT 1", nil, "")
-	if got := db.GetLastQuery(); got != "SELECT 1" {
+	if got := db.Gui.GetLastQuery(); got != "SELECT 1" {
 		t.Errorf("got %q, want %q", got, "SELECT 1")
 	}
 }
@@ -283,16 +282,16 @@ func TestSetLastQueryWithParams_NoArgs(t *testing.T) {
 func TestSetLastQueryWithParams_EmptyArgs(t *testing.T) {
 	db := newTestSessionDB()
 	db.SetLastQueryWithParams("SELECT 1", []any{}, "")
-	if got := db.GetLastQuery(); got != "SELECT 1" {
+	if got := db.Gui.GetLastQuery(); got != "SELECT 1" {
 		t.Errorf("got %q, want %q", got, "SELECT 1")
 	}
 }
 
 func TestSetLastQueryWithParams_SkipsNoise(t *testing.T) {
 	db := newTestSessionDB()
-	db.SetLastQuery("SELECT 1")
+	db.Gui.SetLastQuery("SELECT 1")
 	db.SetLastQueryWithParams("DEALLOCATE pdo_stmt_00000001", []any{"ignored"}, "")
-	if got := db.GetLastQuery(); got != "SELECT 1" {
+	if got := db.Gui.GetLastQuery(); got != "SELECT 1" {
 		t.Errorf("noise should be skipped, got %q", got)
 	}
 }

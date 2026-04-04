@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -11,7 +12,8 @@ import (
 const (
 	DEFAULT_SELECT_ONE    = "-- ping"
 	DEFAULT_SELECT_ZERO   = "-- ping"
-	FULLROLLBACK_SENTINEL = "-- fullrollback" // "pgrollback rollback" response: single CommandComplete+ReadyForQuery, no DB
+	FULLROLLBACK_SENTINEL = "-- fullrollback"          // "pgrollback rollback" response: single CommandComplete+ReadyForQuery, no DB
+	DISCONNECT_SENTINEL   = "-- pgrollback disconnect" // "pgrollback disconnect" response: single CommandComplete+ReadyForQuery, no DB
 )
 
 // InterceptQuery intercepta e modifica queries específicas antes da execução.
@@ -73,7 +75,15 @@ func (p *PgRollback) interceptPgRollbackCommand(testID string, query string) (st
 		return DEFAULT_SELECT_ONE, nil
 
 	case "rollback":
+		log.Printf("[PGROLLBACK] rollback requested for testID=%s", testID)
 		return p.RollbackBaseTransaction(testID)
+
+	case "disconnect":
+		log.Printf("[PGROLLBACK] disconnect requested for testID=%s", testID)
+		if session := p.GetSession(testID); session != nil {
+			session.MarkDisconnectRequested()
+		}
+		return DISCONNECT_SENTINEL, nil
 
 	case "status":
 		return p.buildStatusResultSet(testID)
@@ -82,7 +92,10 @@ func (p *PgRollback) interceptPgRollbackCommand(testID string, query string) (st
 		return p.buildListResultSet()
 
 	case "cleanup":
-		cleaned := p.CleanupExpiredSessions()
+		cleaned, err := p.CleanupExpiredSessions()
+		if err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("SELECT %d AS cleaned", cleaned), nil
 
 	default:
@@ -159,10 +172,11 @@ func (p *PgRollback) buildListResultSet() (string, error) {
 	for testID, session := range sessions {
 		session.mu.RLock()
 		if session.DB == nil {
+			session.mu.RUnlock()
 			return "", fmt.Errorf("Invalid session testID '%s'", testID)
 		}
 		active := session.DB.HasActiveTransaction()
-		level := session.DB.SavepointLevel
+		level := session.DB.GetSavepointLevel()
 		createdAt := session.CreatedAt.Format(time.RFC3339)
 		session.mu.RUnlock()
 

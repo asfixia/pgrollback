@@ -390,3 +390,94 @@ func TestPostgreSQLConnectionLifecycle(t *testing.T) {
 	_ = pgrollback.DestroySession(testIDA)
 	_ = pgrollback.DestroySession(testIDB)
 }
+
+// TestDisconnectAllRemovesBackendConnections verifies that DestroyAllSessions (used by GUI/tray
+// "Disconnect All") closes the underlying PostgreSQL connections so that no backend connection
+// remains with the application_name for those testIDs.
+func TestDisconnectAllRemovesBackendConnections(t *testing.T) {
+	configPath := GetConfigPath()
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Skipf("Skipping test - failed to load config: %v", err)
+		return
+	}
+
+	pgrollback := proxy.NewPgRollback(
+		cfg.Postgres.Host,
+		cfg.Postgres.Port,
+		cfg.Postgres.Database,
+		cfg.Postgres.User,
+		cfg.Postgres.Password,
+		getOrDefault(cfg.Test.QueryTimeout.Duration, 5*time.Second),
+		cfg.Postgres.SessionTimeout.Duration,
+		0,
+	)
+
+	// Create two sessions with different testIDs
+	testIDA := "disconnect_all_clientA"
+	testIDB := "disconnect_all_clientB"
+
+	_, err = pgrollback.GetOrCreateSession(testIDA)
+	if err != nil {
+		t.Skipf("Skipping test - PostgreSQL not available: %v", err)
+		return
+	}
+	_, err = pgrollback.GetOrCreateSession(testIDB)
+	if err != nil {
+		t.Skipf("Skipping test - PostgreSQL not available: %v", err)
+		return
+	}
+
+	// Open a direct connection to PostgreSQL to inspect pg_stat_activity
+	dsn := buildDSN(
+		cfg.Postgres.Host,
+		cfg.Postgres.Port,
+		cfg.Postgres.Database,
+		cfg.Postgres.User,
+		cfg.Postgres.Password,
+		"",
+	)
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("Failed to open direct PostgreSQL connection: %v", err)
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	appA := "pgrollback-" + testIDA
+	appB := "pgrollback-" + testIDB
+
+	var before int
+	if err := db.QueryRowContext(ctx,
+		"SELECT count(*) FROM pg_stat_activity WHERE application_name IN ($1, $2)",
+		appA, appB,
+	).Scan(&before); err != nil {
+		t.Fatalf("Failed to query pg_stat_activity (before): %v", err)
+	}
+	if before < 2 {
+		t.Logf("Expected at least 2 backend connections before disconnect-all, got %d", before)
+	}
+
+	// Destroy all sessions (equivalent to GUI/tray Disconnect All)
+	allSessions := pgrollback.GetAllSessions()
+	for testID := range allSessions {
+		if err := pgrollback.DestroySession(testID); err != nil {
+			t.Fatalf("DestroySession(%s): %v", testID, err)
+		}
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	var after int
+	if err := db.QueryRowContext(ctx,
+		"SELECT count(*) FROM pg_stat_activity WHERE application_name IN ($1, $2)",
+		appA, appB,
+	).Scan(&after); err != nil {
+		t.Fatalf("Failed to query pg_stat_activity (after): %v", err)
+	}
+	if after != 0 {
+		t.Errorf("Expected 0 backend connections after disconnect-all, got %d (apps: %s, %s)", after, appA, appB)
+	}
+}

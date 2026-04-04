@@ -28,11 +28,14 @@ var backendStartupParameterNames = []string{
 }
 
 type TestSession struct {
-	DB           *realSessionDB // abstraction over connection + transaction; use DB.Query/Exec for all commands
-	TestID       string
-	CreatedAt    time.Time
-	LastActivity time.Time
-	mu           sync.RWMutex
+	DB                  *realSessionDB // abstraction over connection + transaction; use DB.Query/Exec for all commands
+	TestID              string
+	CreatedAt           time.Time
+	LastActivity        time.Time
+	DisconnectRequested bool
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	mu                  sync.RWMutex
 }
 
 type PgRollback struct {
@@ -56,7 +59,7 @@ func (s *TestSession) GetLastQueryDuration() string {
 	if s.DB == nil {
 		return ""
 	}
-	return s.DB.GetLastQueryDuration()
+	return s.DB.Gui.GetLastQueryDuration()
 }
 
 func (p *PgRollback) GetTestID(session *TestSession) string {
@@ -68,6 +71,49 @@ func (p *PgRollback) GetTestID(session *TestSession) string {
 		}
 	}
 	return ""
+}
+
+// MarkDisconnectRequested marks this session so that runDisconnectCleanup will fully destroy it
+// (rollback transaction, close connection, remove from map) when the client disconnects.
+func (s *TestSession) MarkDisconnectRequested() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.DisconnectRequested = true
+}
+
+// ShouldDisconnectOnCleanup reports whether this session was marked for destruction on disconnect.
+func (s *TestSession) ShouldDisconnectOnCleanup() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ShouldDisconnectOnCleanupLocked()
+}
+
+func (s *TestSession) ShouldDisconnectOnCleanupLocked() bool {
+	return s.DisconnectRequested
+}
+
+// Context returns the session's context, or context.Background() if not initialized.
+func (s *TestSession) Context() context.Context {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.ctx != nil {
+		return s.ctx
+	}
+	return context.Background()
+}
+
+// Cancel cancels the session's context (if any). Safe to call multiple times.
+func (s *TestSession) Cancel() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.CancelLocked()
+}
+
+func (s *TestSession) CancelLocked() {
+	if s.cancel != nil {
+		s.cancel()
+		// Leave ctx as-is; it remains canceled and useful for checks.
+	}
 }
 
 func NewPgRollback(postgresHost string, postgresPort int, postgresDB, postgresUser, postgresPass string, timeout time.Duration, sessionTimeout time.Duration, keepaliveInterval time.Duration) *PgRollback {
@@ -99,41 +145,45 @@ func NewPgRollback(postgresHost string, postgresPort int, postgresDB, postgresUs
 // e a sessão guarda sua DB (connection + transaction). Tudo fica sob TestSession, indexado por testID.
 func (p *PgRollback) GetOrCreateSession(testID string) (*TestSession, error) {
 	p.mu.Lock()
-	defer func() {
-		p.mu.TryLock()
-		p.mu.Unlock()
-	}()
+	defer p.mu.Unlock()
+	if testID == "" {
+		return nil, fmt.Errorf("testID is required")
+	}
+	if session := p.getUsableExistingSessionLocked(testID); session != nil {
+		return session, nil
+	}
+	newSession, err := p.createNewSessionLocked(testID)
+	if err != nil {
+		return nil, err
+	}
+	p.SessionsByTestID[testID] = newSession
+	return newSession, nil
+}
 
-	// Reutiliza sessão existente se disponível
-	// Isso significa que estamos reutilizando a conexão PostgreSQL e a transação
+// getUsableExistingSessionLocked returns an existing session if it is usable; otherwise it removes it from the map.
+// Caller must hold p.mu (write lock) because it may delete from SessionsByTestID.
+func (p *PgRollback) getUsableExistingSessionLocked(testID string) *TestSession {
+	// Fast path: reuse existing session (brief lock).
 	if session, exists := p.SessionsByTestID[testID]; exists {
 		session.mu.Lock()
 		session.LastActivity = time.Now()
 		session.mu.Unlock()
-		// Verifica se a conexão ainda está válida
-		if session.DB == nil || session.DB.PgConn() == nil {
-			// Remove sessão inválida e cria nova
-			delete(p.SessionsByTestID, testID)
-		} else {
-			return session, nil
-		}
-	}
-	p.mu.Unlock()
 
-	// Cria nova sessão para este testID (conexão fica na sessão)
-	session, err := p.createNewSession(testID)
-	if err != nil {
-		return nil, err
+		if session.DB != nil && session.DB.PgConnLocked() != nil && !session.DB.PgConnLocked().IsClosed() {
+			return session
+		}
+		delete(p.SessionsByTestID, testID)
 	}
-	p.mu.Lock()
-	p.SessionsByTestID[testID] = session
-	p.mu.Unlock()
-	return session, nil
+	return nil
 }
 
 func (p *PgRollback) GetSession(testID string) *TestSession {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+	return p.GetSessionLocked(testID)
+}
+
+func (p *PgRollback) GetSessionLocked(testID string) *TestSession {
 	return p.SessionsByTestID[testID]
 }
 
@@ -148,9 +198,9 @@ func (p *PgRollback) GetAllSessions() map[string]*TestSession {
 	return sessions
 }
 
-// createNewSession cria uma nova sessão para o testID.
+// createNewSessionLocked cria uma nova sessão para o testID.
 // Só é chamada quando não existe sessão para este testID; a conexão fica na sessão.
-func (p *PgRollback) createNewSession(testID string) (*TestSession, error) {
+func (p *PgRollback) createNewSessionLocked(testID string) (*TestSession, error) {
 	if testID == "" {
 		return nil, fmt.Errorf("testID is required to create a new session")
 	}
@@ -163,13 +213,16 @@ func (p *PgRollback) createNewSession(testID string) (*TestSession, error) {
 	// Inicia nova transação na conexão
 	// IMPORTANTE: Mesmo se reutilizamos a conexão, sempre criamos nova transação
 	// A transação anterior (se existia) deve ter sido commitada ou rollback
-	tx, err := conn.Begin(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	tx, err := conn.Begin(ctx)
 	if err != nil {
-		conn.Close(context.Background())
+		cancel()
+		conn.Close(ctx)
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
 
-	db := newSessionDB(conn, tx)
+	//#TODO (IA MANTER ISSO AQUI) Danilo Quero revisar pra usar o keep interval
+	db := newSessionDB(conn, tx, ctx)
 	p.fillBackendStartupCacheIfNeeded(db.PgConn())
 	//if p.KeepaliveInterval > 0 {
 	//	db.startKeepalive(p.KeepaliveInterval)
@@ -179,6 +232,8 @@ func (p *PgRollback) createNewSession(testID string) (*TestSession, error) {
 		DB:           db,
 		CreatedAt:    time.Now(),
 		LastActivity: time.Now(),
+		ctx:          ctx,
+		cancel:       cancel,
 	}
 
 	return session, nil
@@ -237,23 +292,26 @@ func isConnClosedOrFatal(err error) bool {
 func (p *PgRollback) DestroySession(testID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
 	session, exists := p.SessionsByTestID[testID]
 	if !exists {
 		return fmt.Errorf("session not found for test_id: %s", testID)
 	}
-
 	session.mu.Lock()
 	defer session.mu.Unlock()
+	return p.DestroySessionLocked(testID, session)
+}
 
-	if session.DB != nil {
-		if err := session.DB.rollbackTx(context.Background()); err != nil && !isConnClosedOrFatal(err) {
-			return fmt.Errorf("failed to rollback transaction: %w", err)
-		}
-		_ = session.DB.close(context.Background())
-		session.DB = nil
+func (p *PgRollback) DestroySessionLocked(testID string, session *TestSession) error {
+	if session == nil || session.DB == nil {
+		return nil
 	}
-
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := session.DB.close(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to close session: '%s': %w", testID, err)
+	}
+	session.DB = nil
 	delete(p.SessionsByTestID, testID)
 	return nil
 }
@@ -273,7 +331,13 @@ func (p *PgRollback) RollbackSession(testID string) error {
 	return p.DestroySession(testID)
 }
 
-func (p *PgRollback) CleanupExpiredSessions() int {
+// sessionIdleExpired reports whether idle time since LastActivity exceeds p.Timeout.
+// Caller must hold session.mu (read or write lock).
+func (p *PgRollback) sessionIdleExpired(session *TestSession, timeToConsider time.Time) bool {
+	return timeToConsider.Sub(session.LastActivity) > p.Timeout
+}
+
+func (p *PgRollback) CleanupExpiredSessions() (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -282,14 +346,19 @@ func (p *PgRollback) CleanupExpiredSessions() int {
 
 	for testID, session := range p.SessionsByTestID {
 		session.mu.RLock()
-		expired := now.Sub(session.LastActivity) > p.Timeout
+		expired := p.sessionIdleExpired(session, now)
 		session.mu.RUnlock()
 
 		if expired {
 			session.mu.Lock()
 			if session.DB != nil {
-				_ = session.DB.rollbackTx(context.Background())
-				_ = session.DB.close(context.Background())
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				err := session.DB.close(ctx)
+				cancel()
+				if err != nil {
+					session.mu.Unlock()
+					return cleaned, fmt.Errorf("failed to close session: %w", err)
+				}
 				session.DB = nil
 			}
 			session.mu.Unlock()
@@ -298,7 +367,7 @@ func (p *PgRollback) CleanupExpiredSessions() int {
 		}
 	}
 
-	return cleaned
+	return cleaned, nil
 }
 
 func (p *PgRollback) getAdvisoryLockKey(session *TestSession) int64 {
@@ -314,7 +383,7 @@ func (p *PgRollback) acquireAdvisoryLock(session *TestSession) error {
 		return fmt.Errorf("session DB is nil for session %s", p.GetTestID(session))
 	}
 	lockKey := p.getAdvisoryLockKey(session)
-	return session.DB.acquireAdvisoryLock(context.Background(), lockKey)
+	return session.DB.acquireAdvisoryLock(session.Context(), lockKey)
 }
 
 func (p *PgRollback) releaseAdvisoryLock(session *TestSession) error {
@@ -322,9 +391,12 @@ func (p *PgRollback) releaseAdvisoryLock(session *TestSession) error {
 		return fmt.Errorf("session DB is nil for session %s", p.GetTestID(session))
 	}
 	lockKey := p.getAdvisoryLockKey(session)
-	return session.DB.releaseAdvisoryLock(context.Background(), lockKey)
+	return session.DB.releaseAdvisoryLock(session.Context(), lockKey)
 }
 
+// ExecuteWithLock runs query on the session's shared backend transaction while holding a per-test_id
+// PostgreSQL advisory lock. The query is executed via SafeExec (guard savepoint) so a SQL error does
+// not abort the outer transaction — the next advisory lock / proxy command still sees a healthy tx.
 func (p *PgRollback) ExecuteWithLock(session *TestSession, query string) error {
 	if session.DB == nil {
 		return fmt.Errorf("session DB is nil for session %s", p.GetTestID(session))
@@ -338,7 +410,7 @@ func (p *PgRollback) ExecuteWithLock(session *TestSession, query string) error {
 	session.LastActivity = time.Now()
 	session.mu.Unlock()
 
-	_, err := session.DB.Exec(context.Background(), query)
+	_, err := session.DB.SafeExec(session.Context(), query)
 	return err
 }
 
@@ -397,7 +469,7 @@ func (s *TestSession) handleRollback(testID string) (string, error) {
 // Returns FULLROLLBACK_SENTINEL so the proxy sends exactly one CommandComplete+ReadyForQuery without
 // forwarding to the DB, avoiding response attribution issues with the next query (e.g. ResetSession ping).
 func (s *TestSession) RollbackBaseTransaction(testID string) (string, error) {
-	return FULLROLLBACK_SENTINEL, s.DB.startNewTx(context.Background())
+	return FULLROLLBACK_SENTINEL, s.DB.startNewTx(s.Context())
 }
 
 // buildStatusResultSet constrói uma query SELECT para status de uma sessão
@@ -409,13 +481,3 @@ func (s *TestSession) buildStatusResultSet(testID string) (string, error) {
 	}
 	return s.DB.buildStatusResultSet(s.CreatedAt, testID)
 }
-
-//// GetSavepoints retorna a lista de savepoints da sessão
-//func (s *TestSession) GetSavepoints() []string {
-//	s.mu.RLock()
-//	defer s.mu.RUnlock()
-//	// Retorna uma cópia para evitar modificações externas
-//	result := make([]string, len(s.Savepoints))
-//	copy(result, s.Savepoints)
-//	return result
-//}

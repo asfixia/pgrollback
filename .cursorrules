@@ -11,14 +11,14 @@ setEnvironments.bat
 Ou combine em uma única linha:
 
 ```bash
-call setEnvironments.bat && [comando go aqui]
+`cmd /c "setEnvironments.bat && [command]"`
 ```
 
 ## Exemplos
 
-- Para executar `go build`: `call setEnvironments.bat && go build`
-- Para executar `go test`: `call setEnvironments.bat && go test ./...`
-- Para executar `make`: `call setEnvironments.bat && make build`
+- Para executar `go build`: `cmd /c "setEnvironments.bat && go build`
+- Para executar `go test`: `cmd /c "setEnvironments.bat && go test ./...`
+- Para executar `make`: `cmd /c "setEnvironments.bat && make build`
 
 ## Importante
 

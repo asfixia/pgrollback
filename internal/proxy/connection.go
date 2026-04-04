@@ -150,6 +150,10 @@ func (p *proxyConnection) SetPreparedStatement(statementName, query string) {
 func (p *proxyConnection) GetStatementDescription(name string) *pgconn.StatementDescription {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.GetStatementDescriptionLocked(name)
+}
+
+func (p *proxyConnection) GetStatementDescriptionLocked(name string) *pgconn.StatementDescription {
 	return p.statementDescs[name]
 }
 
@@ -157,6 +161,10 @@ func (p *proxyConnection) GetStatementDescription(name string) *pgconn.Statement
 func (p *proxyConnection) SetStatementDescription(name string, sd *pgconn.StatementDescription) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.SetStatementDescriptionLocked(name, sd)
+}
+
+func (p *proxyConnection) SetStatementDescriptionLocked(name string, sd *pgconn.StatementDescription) {
 	p.statementDescs[name] = sd
 }
 
@@ -332,7 +340,10 @@ func (p *proxyConnection) rollbackUserSavepointsOnDisconnect(testID string) {
 		return
 	}
 	if count := p.GetUserOpenTransactionCount(); count > 0 {
-		_ = session.DB.RollbackUserSavepointsOnDisconnect(context.Background(), count)
+		err := session.DB.RollbackUserSavepointsOnDisconnect(context.Background(), count)
+		if err != nil {
+			log.Printf("[PROXY] Error rolling back user savepoints on disconnect: %v", err)
+		}
 	}
 }
 
@@ -432,9 +443,9 @@ func (p *proxyConnection) ApplyTCLSuccessTracking(query string, session *TestSes
 			if err := p.DecrementUserOpenTransactionCount(); err != nil {
 				return err
 			}
-			session.DB.decrementSavepointLevelLocked()
-			if p.getUserOpenTransactionCountLocked() == 0 {
-				session.DB.releaseOpenTransactionLocked(p.connectionID())
+			session.DB.DecrementSavepointLevel()
+			if p.GetUserOpenTransactionCount() == 0 {
+				session.DB.ReleaseOpenTransaction(p.connectionID())
 			}
 			continue
 		}

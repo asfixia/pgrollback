@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"os"
@@ -24,7 +23,7 @@ func recoverSessionTxAfterDirectExec(session *TestSession) {
 	if session == nil || session.DB == nil {
 		return
 	}
-	if err := session.DB.startNewTx(context.Background()); err != nil {
+	if err := session.DB.startNewTx(session.Context()); err != nil {
 		log.Printf("[PROXY] Recover tx after direct exec error: %v", err)
 	}
 }
@@ -163,7 +162,7 @@ func (p *proxyConnection) ForwardCommandToDB(testID string, query string, sendRe
 	var err error
 
 	log.Printf("[PROXY] ForwardCommandToDB: Executando via transação: %s", query)
-	session.DB.SetLastQuery(query)
+	session.DB.Gui.SetLastQuery(query)
 	start := time.Now()
 
 	// All TCL (SAVEPOINT, RELEASE, ROLLBACK) goes to SafeExecTCL, which runs inside a guard
@@ -190,7 +189,7 @@ func (p *proxyConnection) ForwardCommandToDB(testID string, query string, sendRe
 				return err
 			}
 		}
-		tag, err = session.DB.SafeExecTCL(context.Background(), query, args...)
+		tag, err = session.DB.SafeExecTCL(session.Context(), query, args...)
 		if err != nil {
 			affectsClaim := isUserBegin
 			if stmt != nil {
@@ -210,7 +209,7 @@ func (p *proxyConnection) ForwardCommandToDB(testID string, query string, sendRe
 			return err
 		}
 	} else {
-		tag, err = session.DB.SafeExec(context.Background(), query, args...)
+		tag, err = session.DB.SafeExec(session.Context(), query, args...)
 		if err != nil {
 			return err
 		}
@@ -243,7 +242,7 @@ func (p *proxyConnection) ForwardCommandToDB(testID string, query string, sendRe
 
 	elapsed := time.Since(start)
 	if session.DB != nil {
-		session.DB.UpdateLastQueryHistoryDuration(elapsed)
+		session.DB.Gui.UpdateLastQueryHistoryDuration(elapsed)
 	}
 	if sendReadyForQuery {
 		if os.Getenv("PGROLLBACK_LOG_MESSAGE_ORDER") == "1" {
@@ -262,12 +261,11 @@ func (p *proxyConnection) ForwardCommandToDB(testID string, query string, sendRe
 // The real transaction is never aborted; only the savepoint is rolled back on failure.
 func (p *proxyConnection) SafeForwardMultipleCommandsToDB(testID string, commands []string, sendReadyForQuery bool) error {
 	const multiCommandSavepointName = "pgrollback_multi_guard"
-	ctx := context.Background()
 	session := p.server.PgRollback.GetSession(testID)
 	if session == nil {
 		return fmt.Errorf("sessão não encontrada para testID: '%s'", testID)
 	}
-
+	ctx := session.Context()
 	pgConn := session.DB.PgConn()
 	if pgConn == nil {
 		return fmt.Errorf("sessão sem conexão para testID: '%s'", testID)
@@ -276,9 +274,9 @@ func (p *proxyConnection) SafeForwardMultipleCommandsToDB(testID string, command
 		return fmt.Errorf("sessão existe mas sem transaction: '%s'", testID)
 	}
 
-	// SetLastQuery uses d.mu.Lock(); do not call it while holding LockRun() (same mutex) to avoid deadlock.
+	// Gui methods are self-contained, safe to call before LockRun.
 	fullQuery := strings.Join(commands, "; ")
-	session.DB.SetLastQuery(fullQuery)
+	session.DB.Gui.SetLastQuery(fullQuery)
 	if !strings.HasSuffix(fullQuery, ";") {
 		fullQuery += ";"
 	}
@@ -397,7 +395,7 @@ func (p *proxyConnection) SafeForwardMultipleCommandsToDB(testID string, command
 
 	elapsed := time.Since(start)
 	if session.DB != nil {
-		session.DB.updateLastQueryHistoryDurationLocked(elapsed)
+		session.DB.Gui.UpdateLastQueryHistoryDuration(elapsed)
 	}
 	log.Printf("[PROXY] Multi-command batch executed")
 	if sendReadyForQuery {
@@ -413,11 +411,11 @@ func (p *proxyConnection) ExecuteSelectQuery(testID string, query string, sendRe
 		return fmt.Errorf("sessão não encontrada para testID: %s", testID)
 	}
 	if session.DB != nil && query != "" {
-		session.DB.SetLastQuery(query)
+		session.DB.Gui.SetLastQuery(query)
 	}
 
 	start := time.Now()
-	rows, err := session.DB.SafeQuery(context.Background(), query, args...)
+	rows, err := session.DB.SafeQuery(session.Context(), query, args...)
 	if err != nil {
 		return err
 	}
@@ -429,7 +427,7 @@ func (p *proxyConnection) ExecuteSelectQuery(testID string, query string, sendRe
 
 	elapsed := time.Since(start)
 	if session.DB != nil {
-		session.DB.UpdateLastQueryHistoryDuration(elapsed)
+		session.DB.Gui.UpdateLastQueryHistoryDuration(elapsed)
 	}
 	log.Printf("[PROXY] Query executed")
 	if sendReadyForQuery {
