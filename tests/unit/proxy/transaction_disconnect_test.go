@@ -14,14 +14,13 @@ import (
 // TestUserTransactionRolledBackOnDisconnect verifies that user-started transactions (BEGIN)
 // are rolled back when the client disconnects, while the base transaction used by pgrollback
 // remains active and unchanged.
+//
+// Verbose proxy logs ([PROXY-ML], etc.): run with go test -v, or set PGROLLBACK_LOG_LEVEL=debug / GO_TEST_VERBOSE=1.
 func TestUserTransactionRolledBackOnDisconnect(t *testing.T) {
 	testID := "test_tx_disconnect"
 
 	db, ctx, proxyServer, cleanup := connectToProxyForTestWithServer(t, testID)
 	defer cleanup()
-
-	db.SetConnMaxLifetime(5 * time.Second)
-	db.SetMaxOpenConns(1)
 
 	tableName := fmt.Sprintf("pgrollback_tx_disconnect_%d", time.Now().UnixNano())
 

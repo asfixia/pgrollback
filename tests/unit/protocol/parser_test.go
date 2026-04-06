@@ -6,6 +6,132 @@ import (
 	"pgrollback/pkg/protocol"
 )
 
+func TestParseApplicationIdentity(t *testing.T) {
+	tests := []struct {
+		name        string
+		params      map[string]string
+		wantTestID  string
+		wantDisplay string
+	}{
+		{
+			name:        "nil params",
+			params:      nil,
+			wantTestID:  "default",
+			wantDisplay: "(sem application_name)",
+		},
+		{
+			name: "pgrollback underscore",
+			params: map[string]string{
+				"application_name": "pgrollback_my_test",
+			},
+			wantTestID:  "my_test",
+			wantDisplay: "my_test",
+		},
+		{
+			name: "pgrollback dash",
+			params: map[string]string{
+				"application_name": "pgrollback-abc",
+			},
+			wantTestID:  "abc",
+			wantDisplay: "abc",
+		},
+		{
+			name: "other client",
+			params: map[string]string{
+				"application_name": "pgAdmin 4",
+			},
+			wantTestID:  "pgAdmin 4",
+			wantDisplay: "pgAdmin 4",
+		},
+		{
+			name: "literal default",
+			params: map[string]string{
+				"application_name": "default",
+			},
+			wantTestID:  "default",
+			wantDisplay: "default",
+		},
+		{
+			name: "invalid_format style",
+			params: map[string]string{
+				"application_name": "invalid_format",
+			},
+			wantTestID:  "invalid_format",
+			wantDisplay: "invalid_format",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotID, gotDisp := protocol.ParseApplicationIdentity(tt.params)
+			if gotID != tt.wantTestID {
+				t.Errorf("testID = %q, want %q", gotID, tt.wantTestID)
+			}
+			if gotDisp != tt.wantDisplay {
+				t.Errorf("displayName = %q, want %q", gotDisp, tt.wantDisplay)
+			}
+			// Wrappers stay aligned
+			if testID, _ := protocol.ParseApplicationIdentity(tt.params); testID != tt.wantTestID {
+				t.Errorf("ExtractTestID = %q, want %q", testID, tt.wantTestID)
+			}
+			if _, displayName := protocol.ParseApplicationIdentity(tt.params); displayName != tt.wantDisplay {
+				t.Errorf("ExtractAppname = %q, want %q", displayName, tt.wantDisplay)
+			}
+		})
+	}
+}
+
+func TestExtractAppname(t *testing.T) {
+	tests := []struct {
+		name   string
+		params map[string]string
+		want   string
+	}{
+		{
+			name: "pgrollback prefix returns test id only",
+			params: map[string]string{
+				"application_name": "pgrollback_my_test",
+			},
+			want: "my_test",
+		},
+		{
+			name: "pgrollback-dash prefix",
+			params: map[string]string{
+				"application_name": "pgrollback-abc",
+			},
+			want: "abc",
+		},
+		{
+			name: "no prefix returns full application_name",
+			params: map[string]string{
+				"application_name": "pgAdmin 4",
+			},
+			want: "pgAdmin 4",
+		},
+		{
+			name: "missing application_name",
+			params: map[string]string{
+				"database": "x",
+			},
+			want: "(sem application_name)",
+		},
+		{
+			name: "empty application_name",
+			params: map[string]string{
+				"application_name": "",
+			},
+			want: "(sem application_name)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, got := protocol.ParseApplicationIdentity(tt.params)
+			if got != tt.want {
+				t.Errorf("ExtractAppname() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestExtractTestID(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -65,11 +191,7 @@ func TestExtractTestID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := protocol.ExtractTestID(tt.params)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("ExtractTestID() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
+			got, _ := protocol.ParseApplicationIdentity(tt.params)
 			if got != tt.want {
 				t.Errorf("ExtractTestID() = %v, want %v", got, tt.want)
 			}

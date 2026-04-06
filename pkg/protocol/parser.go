@@ -4,34 +4,40 @@ import (
 	"regexp"
 )
 
-func ExtractAppname(params map[string]string) string {
-	if params == nil || params["application_name"] == "" {
-		return "(sem application_name)"
+// ParseApplicationIdentity reads startup parameters and returns:
+//   - testID: session key for routing.
+//   - displayName: for logs — "(sem application_name)" when unset; for pgrollback_* the same id as testID;
+//     otherwise the raw application_name.
+func ParseApplicationIdentity(params map[string]string) (testID string, displayName string) {
+	// pgrollbackApplicationNameRegexp matches application_name values that identify a test session:
+	// "pgrollback_<test_id>" or "pgrollback-<test_id>". The first submatch is test_id.
+	var pgrollbackApplicationNameRegexp = regexp.MustCompile(`^pgrollback[_-](.+)$`)
+	raw := ""
+	if params != nil {
+		raw = params["application_name"]
 	}
-	return params["application_name"]
+	if raw == "" {
+		return "default", "(sem application_name)"
+	}
+	if raw == "default" {
+		return "default", "default"
+	}
+	if m := pgrollbackApplicationNameRegexp.FindStringSubmatch(raw); m != nil {
+		return m[1], m[1]
+	}
+	return raw, raw
 }
 
+// ExtractAppname returns displayName only (see ParseApplicationIdentity).
+func ExtractAppname(params map[string]string) string {
+	_, display := ParseApplicationIdentity(params)
+	return display
+}
+
+// ExtractTestID returns testID only (see ParseApplicationIdentity). Error is always nil today.
 func ExtractTestID(params map[string]string) (string, error) {
-	appName := params["application_name"]
-
-	// Se não há application_name ou é 'default', usa conexão compartilhada
-	if appName == "" || appName == "default" {
-		return "default", nil
-	}
-
-	// Verifica se está no formato pgrollback_<test_id>
-	match := regexp.MustCompile(`^pgrollback[_-](.+)$`).FindStringSubmatch(appName)
-	if match != nil {
-		return match[1], nil
-	}
-
-	if len(appName) > 0 {
-		return appName, nil
-	}
-
-	// Qualquer outro application_name (como "pgAdmin", "psql", etc.) usa conexão compartilhada
-	// O application_name será definido como "pgrollback_default" ao conectar ao PostgreSQL real
-	return "default", nil
+	id, _ := ParseApplicationIdentity(params)
+	return id, nil
 }
 
 func BuildStartupMessageForPostgres(params map[string]string) map[string]string {

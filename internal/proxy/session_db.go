@@ -389,6 +389,11 @@ func (d *realSessionDB) SafeExecTCL(ctx context.Context, sql string, args ...any
 	defer d.Gui.decRunningQueryCount()
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.safeExecTCLLocked(ctx, sql, args...)
+}
+
+// safeExecTCLLocked is the body of SafeExecTCL; caller must hold d.mu (write lock).
+func (d *realSessionDB) safeExecTCLLocked(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	if isSavepointCommand(sql) {
 		return d.tx.Exec(ctx, sql, args...)
 	}
@@ -451,17 +456,18 @@ func (d *realSessionDB) RollbackUserSavepointsOnDisconnect(ctx context.Context, 
 	if count <= 0 {
 		return nil
 	}
+	d.Gui.incRunningQueryCount()
+	defer d.Gui.decRunningQueryCount()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	qntToRollback := min(d.SavepointLevel, count)
 	if qntToRollback <= 0 {
-		d.mu.Unlock()
 		return nil
 	}
 	newSpQnt := d.SavepointLevel - qntToRollback
-	spName := fmt.Sprintf("pgrollback_v_%d", newSpQnt)
+	spName := fmt.Sprintf("pgrollback_v_%d", newSpQnt+1)
 	sql := fmt.Sprintf("ROLLBACK TO SAVEPOINT %s; RELEASE SAVEPOINT %s", spName, spName)
-	if _, err := d.SafeExecTCL(ctx, sql); err != nil {
+	if _, err := d.safeExecTCLLocked(ctx, sql); err != nil {
 		logIfVerbose("[PROXY] RollbackUserSavepointsOnDisconnect: %v", err)
 		return err
 	}

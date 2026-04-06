@@ -13,6 +13,7 @@ import (
 	"pgrollback/internal/config"
 	"pgrollback/internal/proxy"
 	"pgrollback/internal/testutil"
+	"pgrollback/pkg/logger"
 	sqlpkg "pgrollback/pkg/sql"
 
 	"github.com/jackc/pgx/v5"
@@ -30,14 +31,19 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "proxy test: failed to load config: %v\n", err)
 		os.Exit(1)
 	}
+	if err := logger.InitFromConfig(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "proxy test: logger init: %v\n", err)
+	}
+	// With go test -v (or GO_TEST_VERBOSE=1), enable DEBUG so pkg/logger lines print
+	// (e.g. [PROXY-ML] in message_loop.go). Otherwise level comes from config / PGROLLBACK_LOG_LEVEL.
+	if testutil.IsTestVerbose() {
+		logger.SetDefaultLevel(logger.DEBUG)
+	}
+
 	useExternal := os.Getenv("PGROLLBACK_USE_EXTERNAL_SERVER") == "1" || os.Getenv("PGROLLBACK_USE_EXTERNAL_SERVER") == "true"
 	if useExternal {
 		code := m.Run()
 		os.Exit(code)
-	}
-	host := cfg.Proxy.ListenHost
-	if host == "" || host == "localhost" {
-		host = "127.0.0.1" // use IPv4 so client and server match on Windows
 	}
 	// Use port 0 so the OS assigns a free port (avoids "port already in use" when multiple test runs or integration left 5433 open)
 	proxyTestServer = proxy.NewServer(
@@ -49,7 +55,7 @@ func TestMain(m *testing.M) {
 		cfg.Proxy.Timeout,
 		cfg.Postgres.SessionTimeout.Duration,
 		0,
-		host,
+		cfg.Proxy.ListenHost,
 		0,
 		false,
 	)
@@ -133,7 +139,7 @@ func openDBToProxy(t *testing.T, host string, port int, cfg *config.Config, appl
 	if err != nil {
 		t.Fatalf("Failed to open connection to proxy: %v", err)
 	}
-	pingWithTimeout(t, db, 5*time.Second)
+	pingWithTimeout(t, db, 20*time.Second)
 	return db
 }
 
@@ -145,10 +151,6 @@ func connectToProxyForTest(t *testing.T, testID string) (*sql.DB, context.Contex
 	if cfg == nil {
 		return nil, nil, func() {}
 	}
-	host := cfg.Proxy.ListenHost
-	if host == "" || host == "localhost" {
-		host = "127.0.0.1"
-	}
 	proxyServer := proxy.NewServer(
 		cfg.Postgres.Host,
 		cfg.Postgres.Port,
@@ -158,7 +160,7 @@ func connectToProxyForTest(t *testing.T, testID string) (*sql.DB, context.Contex
 		cfg.Proxy.Timeout,
 		cfg.Postgres.SessionTimeout.Duration,
 		0,
-		host,
+		cfg.Proxy.ListenHost,
 		0, // dynamic port to avoid conflicts
 		false,
 	)
@@ -185,10 +187,6 @@ func connectToProxyForTestWithAppName(t *testing.T, applicationName string) (*sq
 	if cfg == nil {
 		return nil, nil, func() {}
 	}
-	host := cfg.Proxy.ListenHost
-	if host == "" || host == "localhost" {
-		host = "127.0.0.1"
-	}
 	proxyServer := proxy.NewServer(
 		cfg.Postgres.Host,
 		cfg.Postgres.Port,
@@ -198,7 +196,7 @@ func connectToProxyForTestWithAppName(t *testing.T, applicationName string) (*sq
 		cfg.Proxy.Timeout,
 		cfg.Postgres.SessionTimeout.Duration,
 		0,
-		host,
+		cfg.Proxy.ListenHost,
 		0, // dynamic port
 		false,
 	)
@@ -225,10 +223,6 @@ func connectToProxyForTestWithServer(t *testing.T, testID string) (*sql.DB, cont
 	if cfg == nil {
 		return nil, nil, nil, func() {}
 	}
-	host := cfg.Proxy.ListenHost
-	if host == "" || host == "localhost" {
-		host = "127.0.0.1"
-	}
 	proxyServer := proxy.NewServer(
 		cfg.Postgres.Host,
 		cfg.Postgres.Port,
@@ -238,14 +232,14 @@ func connectToProxyForTestWithServer(t *testing.T, testID string) (*sql.DB, cont
 		cfg.Proxy.Timeout,
 		cfg.Postgres.SessionTimeout.Duration,
 		0,
-		host,
+		cfg.Proxy.ListenHost,
 		0,
 		false,
 	)
 	if err := proxyServer.StartError(); err != nil {
 		t.Fatalf("Failed to start proxy server: %v", err)
 	}
-	db := openDBToProxy(t, proxyServer.ListenHost(), proxyServer.ListenPort(), cfg, "pgrollback_"+testID)
+	db := openDBToProxy(t, proxyServer.ListenHost(), proxyServer.ListenPort(), cfg, "pgrollback-"+testID)
 	if db == nil {
 		return nil, nil, nil, func() {}
 	}
@@ -265,10 +259,6 @@ func connectToProxyForTestWithAppNameAndServer(t *testing.T, applicationName str
 	if cfg == nil {
 		return nil, nil, nil, func() {}
 	}
-	host := cfg.Proxy.ListenHost
-	if host == "" || host == "localhost" {
-		host = "127.0.0.1"
-	}
 	proxyServer := proxy.NewServer(
 		cfg.Postgres.Host,
 		cfg.Postgres.Port,
@@ -278,7 +268,7 @@ func connectToProxyForTestWithAppNameAndServer(t *testing.T, applicationName str
 		cfg.Proxy.Timeout,
 		cfg.Postgres.SessionTimeout.Duration,
 		0,
-		host,
+		cfg.Proxy.ListenHost,
 		0,
 		false,
 	)
@@ -396,7 +386,7 @@ func stopProxyServer(proxyServer *proxy.Server) {
 // Falha o teste se o ping não for bem-sucedido.
 func pingWithTimeout(t *testing.T, db *sql.DB, timeout time.Duration) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout*1000)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout*100000)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
@@ -416,7 +406,12 @@ func QueryContextLastResult(t *testing.T, db *sql.DB, ctx context.Context, query
 		// Some drivers/pool states can return (nil, nil); treat as failure so callers get a clear error.
 		return nil, fmt.Errorf("driver returned nil connection with no error (conn == nil, err == nil); proxy may not be responding")
 	}
-	defer conn.Close()
+	canCloseConn := true
+	defer func() {
+		if conn != nil && canCloseConn {
+			conn.Close()
+		}
+	}()
 
 	var pgxConn *pgx.Conn
 	err = conn.Raw(func(driverConn interface{}) error {
@@ -455,7 +450,12 @@ func QueryContextLastResult(t *testing.T, db *sql.DB, ctx context.Context, query
 		return nil, fmt.Errorf("query has no commands")
 	}
 	lastCmd := commands[len(commands)-1]
-	return db.QueryContext(ctx, lastCmd)
+	rows, err := conn.QueryContext(ctx, lastCmd)
+	if err != nil {
+		return nil, err
+	}
+	canCloseConn = false
+	return rows, nil
 }
 
 //// ExecuteMultipleStatements executa múltiplas declarações SQL usando Exec

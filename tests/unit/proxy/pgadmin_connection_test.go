@@ -45,7 +45,9 @@ func TestPGAdminLikeConnection(t *testing.T) {
 
 	t.Logf("About to execute pgAdmin initial query with timeout: %v", queryTimeout)
 	startTime := time.Now()
-	rowCount := executePGAdminInitialQuery(t, db, queryCtx)
+	pgAdminCtx, pgAdminCancel := context.WithTimeout(ctx, queryTimeout)
+	defer pgAdminCancel()
+	rowCount := executePGAdminInitialQuery(t, db, pgAdminCtx)
 	if rowCount != 1 {
 		t.Fatalf("Expected 1 row, got %d", rowCount)
 	}
@@ -53,7 +55,9 @@ func TestPGAdminLikeConnection(t *testing.T) {
 	t.Logf("Query executed successfully in %v", elapsed)
 	t.Logf("pgAdmin initial query executed successfully, returned %d rows", rowCount)
 
-	verifyConnectionStillWorks(t, db, queryCtx)
+	verifyCtx, verifyCancel := context.WithTimeout(ctx, queryTimeout)
+	defer verifyCancel()
+	verifyConnectionStillWorks(t, db, verifyCtx)
 }
 
 func connectToProxyServer(t *testing.T, ctx context.Context, host string, port int, database, user, password, applicationName string, pingTimeout time.Duration) *sql.DB {

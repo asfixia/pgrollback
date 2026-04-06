@@ -2,15 +2,14 @@ package proxy
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
-	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,10 +43,8 @@ type Server struct {
 	mu         sync.RWMutex
 	// activeConns holds all accepted client connections so Stop() can close them and unblock handlers
 	activeConns map[net.Conn]struct{}
-	// GUI on same port: connections that look like HTTP are pushed here and served by guiHTTP
-	guiCh       chan net.Conn
-	guiListener *injectListener
-	guiHTTP     *http.Server
+	// GUI on same port; non-nil when NewServer(..., withGUI=true). Owns inject listener + HTTP server.
+	gui *samePortGUIServer
 }
 
 // ListenHost returns the host the server is bound to (e.g. "127.0.0.1").
@@ -56,99 +53,89 @@ func (s *Server) ListenHost() string { s.mu.RLock(); defer s.mu.RUnlock(); retur
 // ListenPort returns the port the server is bound to. Useful when NewServer was called with port 0 (dynamic port).
 func (s *Server) ListenPort() int { s.mu.RLock(); defer s.mu.RUnlock(); return s.listenPort }
 
+// bindAndListenTCP binds the TCP listener from bindPort: 0 = kernel-assigned port (updates listenHost/listenPort);
+// >0 = fixed port (optional isPortInUse check); <0 returns error.
+// After Listen succeeds, waits until the port accepts TCP connections (same probe as waitUntilListening).
+func (s *Server) bindAndListenTCP(bindPort int) error {
+	if bindPort < 0 {
+		return fmt.Errorf("invalid proxy listen port %d (must be >= 0)", bindPort)
+	}
+	host := s.listenHost
+	if bindPort > 0 && isPortInUse(host, bindPort) {
+		return fmt.Errorf("port %s:%d is already in use. Cannot start server. Please stop any service using this port", host, bindPort)
+	}
+	listenAddr := fmt.Sprintf("%s:%d", host, bindPort)
+	listener, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		return fmt.Errorf("failed to listen on %s: %w", listenAddr, err)
+	}
+	s.listener = listener
+	if bindPort == 0 {
+		if tcpAddr, ok := listener.Addr().(*net.TCPAddr); ok {
+			s.mu.Lock()
+			s.listenPort = tcpAddr.Port
+			if tcpAddr.IP != nil && !tcpAddr.IP.IsUnspecified() {
+				s.listenHost = tcpAddr.IP.String()
+			}
+			s.mu.Unlock()
+		}
+	}
+	readyHost := s.ListenHost()
+	readyPort := s.ListenPort()
+	if !s.waitUntilListening(readyHost, readyPort) {
+		_ = s.listener.Close()
+		s.listener = nil
+		return fmt.Errorf("server failed to start listening on %s:%d after %d attempts", readyHost, readyPort, serverStartupCheckAttempts)
+	}
+	return nil
+}
+
 // isPortInUse verifica se uma porta está em uso tentando conectar a ela
 func isPortInUse(host string, port int) bool {
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(port)), portCheckTimeout)
 	if err != nil {
 		return false
 	}
-	conn.Close()
+	_ = conn.Close()
 	return true
 }
 
 // NewServer cria uma nova instância do Server e inicia o servidor automaticamente
 // Retorna sempre o Server, mesmo se houver erro ao iniciar
-// Se listenHost for vazio, usa "localhost" como padrão
-// Se listenPort for 0, binds to a dynamic port (use ListenPort() to get the actual port); otherwise uses DefaultListenPort (5433) when listenPort was not set by caller.
-// Se sessionTimeout for 0, usa DefaultSessionTimeout (24h) como padrão
-// When listenPort > 0, verifica se a porta está disponível antes de tentar iniciar o servidor
+//
+// Proxy listen address (proxyListenHost, proxyListenPort):
+//   - proxyListenPort > 0: bind to that fixed port (fails if already in use).
+//   - proxyListenPort == 0: bind to host:0 and use the kernel-assigned port; call ListenPort() after start.
+//
+// Se proxyListenHost estiver vazio, usa "localhost". Se sessionTimeout for 0, usa DefaultSessionTimeout.
 // Se houver erro ao iniciar, o erro é armazenado no Server e pode ser verificado com StartError()
-func NewServer(postgresHost string, postgresPort int, postgresDB, postgresUser, postgresPass string, timeout time.Duration, sessionTimeout time.Duration, keepaliveInterval time.Duration, listenHost string, listenPort int, withGUI bool) *Server {
-	// Usa valores padrão se não especificados
+func NewServer(postgresHost string, postgresPort int, postgresDB, postgresUser, postgresPass string, timeout time.Duration, sessionTimeout time.Duration, keepaliveInterval time.Duration, proxyListenHost string, proxyListenPort int, withGUI bool) *Server {
 	if sessionTimeout <= 0 {
 		sessionTimeout = DefaultSessionTimeout
-	}
-	useDynamicPort := (listenPort == 0)
-	if !useDynamicPort && listenPort == 0 {
-		listenPort = DefaultListenPort
-	}
-	if listenHost == "" {
-		listenHost = "localhost"
 	}
 
 	pgrollback := NewPgRollback(postgresHost, postgresPort, postgresDB, postgresUser, postgresPass, timeout, sessionTimeout, keepaliveInterval)
 	server := &Server{
 		PgRollback:  pgrollback,
-		listenHost:  listenHost,
-		listenPort:  listenPort,
+		listenHost:  proxyListenHost,
+		listenPort:  proxyListenPort,
 		activeConns: make(map[net.Conn]struct{}),
 	}
 
-	bindPort := listenPort
-	if useDynamicPort {
-		bindPort = 0
-	}
-	addr := fmt.Sprintf("%s:%d", listenHost, bindPort)
-	if !useDynamicPort && isPortInUse(listenHost, listenPort) {
+	if err := server.bindAndListenTCP(proxyListenPort); err != nil {
 		server.mu.Lock()
-		server.startErr = fmt.Errorf("port %s:%d is already in use. Cannot start server. Please stop any service using this port", listenHost, listenPort)
+		server.startErr = err
 		server.mu.Unlock()
 		return server
-	}
-
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		server.mu.Lock()
-		server.startErr = fmt.Errorf("failed to listen on %s: %w", addr, err)
-		server.mu.Unlock()
-		return server
-	}
-
-	server.listener = listener
-	if useDynamicPort {
-		if tcpAddr, ok := listener.Addr().(*net.TCPAddr); ok {
-			server.mu.Lock()
-			server.listenPort = tcpAddr.Port
-			if tcpAddr.IP != nil && !tcpAddr.IP.IsUnspecified() {
-				server.listenHost = tcpAddr.IP.String()
-			}
-			server.mu.Unlock()
-		}
 	}
 
 	if withGUI {
-		server.guiCh = make(chan net.Conn, 32)
-		server.guiListener = newInjectListenerWithChan(server.guiCh)
-		server.guiHTTP = &http.Server{Handler: guiMux(server)}
-		go func() {
-			if err := server.guiHTTP.Serve(server.guiListener); err != nil && err != http.ErrServerClosed {
-				log.Printf("[GUI] Server error: %v", err)
-			}
-		}()
+		server.gui = newSamePortGUIServer(server)
 	}
 
 	go server.acceptConnections()
 
-	actualHost := server.ListenHost()
-	actualPort := server.ListenPort()
-	if !server.waitUntilListening(actualHost, actualPort) {
-		server.mu.Lock()
-		server.startErr = fmt.Errorf("server failed to start listening on %s:%d after %d attempts", actualHost, actualPort, serverStartupCheckAttempts)
-		server.mu.Unlock()
-		return server
-	}
-
-	logIfVerbose("PgRollback server listening on %s:%d", actualHost, actualPort)
+	logIfVerbose("PgRollback server listening on %s:%d", server.ListenHost(), server.ListenPort())
 	return server
 }
 
@@ -172,7 +159,7 @@ func (s *Server) waitUntilListening(host string, port int) bool {
 //
 // Reutilização de Conexões PostgreSQL por application_name:
 // - Cada cliente se conecta ao pgrollback usando application_name (via parâmetro de conexão)
-// - O application_name é extraído e convertido em testID (via protocol.ExtractTestID)
+// - O application_name é extraído e convertido em testID (via protocol.ParseApplicationIdentity)
 // - O mesmo testID sempre reutiliza a mesma conexão física ao PostgreSQL real
 // - Isso é gerenciado por SessionsByTestID: cada sessão guarda sua DB (conn+tx) sob o testID
 //
@@ -209,7 +196,7 @@ func (s *Server) acceptConnections() {
 		}
 
 		s.debugLogIncomingConn(conn)
-		if s.guiCh != nil {
+		if s.gui != nil {
 			conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 			peeked := make([]byte, peekSize)
 			n, peekErr := conn.Read(peeked)
@@ -218,7 +205,7 @@ func (s *Server) acceptConnections() {
 				peeked = peeked[:n]
 				wrapped := newPeekedConn(conn, peeked)
 				if isHTTPPeek(peeked) {
-					s.guiListener.Push(wrapped)
+					s.gui.pushConn(wrapped)
 					continue
 				}
 				s.wg.Add(1)
@@ -255,13 +242,8 @@ func (s *Server) Stop() error {
 		if err := listener.Close(); err != nil {
 			return err
 		}
-		if s.guiListener != nil {
-			_ = s.guiListener.Close()
-		}
-		if s.guiHTTP != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			_ = s.guiHTTP.Shutdown(ctx)
-			cancel()
+		if s.gui != nil {
+			s.gui.shutdown()
 		}
 		for _, c := range conns {
 			_ = c.Close()
@@ -375,11 +357,28 @@ func (s *Server) createBackendWithPreRead(clientConn net.Conn, dataSize int, len
 	return pgproto3.NewBackend(multiReader, clientConn)
 }
 
+// isConnClosedBeforePasswordErr reports common client-side teardown while waiting for PasswordMessage.
+func isConnClosedBeforePasswordErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "connection reset") ||
+		strings.Contains(s, "broken pipe") ||
+		strings.Contains(s, "wsarecv") ||
+		strings.Contains(s, "use of closed") ||
+		strings.Contains(s, "forcibly closed") ||
+		strings.Contains(s, "aborted")
+}
+
 // processConnectionStartupMessage processa a mensagem de startup do cliente e estabelece a sessão
 //
 // Fluxo de Autenticação:
 // 1. Recebe StartupMessage do cliente (contém application_name e outros parâmetros)
-// 2. Extrai o testID do application_name (via protocol.ExtractTestID)
+// 2. Extrai o testID do application_name (via protocol.ParseApplicationIdentity)
 // 3. Simula autenticação PostgreSQL para o cliente:
 //   - Solicita senha (AuthenticationCleartextPassword)
 //   - Recebe senha do cliente
@@ -401,18 +400,10 @@ func (s *Server) processConnectionStartupMessage(backend *pgproto3.Backend, clie
 	if err != nil {
 		return
 	}
-	// Extrai testID do application_name do cliente
-	// O mesmo application_name sempre resulta no mesmo testID
-	testID, err := protocol.ExtractTestID(params)
-	if err != nil {
-		errorBackend := pgproto3.NewBackend(clientConn, clientConn)
-		sendErrorToClient(errorBackend, err.Error())
-		return
-	}
+	// testID + nome para log a partir de application_name (ver protocol.ParseApplicationIdentity)
+	testID, appName := protocol.ParseApplicationIdentity(params)
 
 	// Log para identificar qual teste/código está fazendo a conexão
-	// O testID identifica qual teste está conectando (ex: "test_commit_protection" = TestProtectionAgainstAccidentalCommit)
-	appName := protocol.ExtractAppname(params)
 	remoteAddr := clientConn.RemoteAddr().String()
 	logIfVerbose("[SERVER] Conexão estabelecida - testID=%s, application_name=%s, origem=%s", testID, appName, remoteAddr)
 
@@ -426,7 +417,12 @@ func (s *Server) processConnectionStartupMessage(backend *pgproto3.Backend, clie
 
 	passwordMsg, err := backend.Receive()
 	if err != nil {
-		log.Printf("Error receiving password message: %v", err)
+		// Client often closes abandoned or raced TCP connects (e.g. database/sql pool churn); not worth ERROR spam.
+		if isConnClosedBeforePasswordErr(err) {
+			logIfVerbose("client closed connection before password message: %v", err)
+		} else {
+			log.Printf("Error receiving password message: %v", err)
+		}
 		return
 	}
 
