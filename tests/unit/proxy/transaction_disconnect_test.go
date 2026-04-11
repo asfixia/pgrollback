@@ -187,6 +187,65 @@ func TestDisconnectWithoutCommitTableGone(t *testing.T) {
 	}
 }
 
+// TestBeginCommitCreateThenSessionDisconnectTableGone runs CREATE TABLE, BEGIN, COMMIT (RELEASE SAVEPOINT),
+// then tears down the pgrollback session so the backend base transaction rolls back on disconnect.
+// A plain TCP close without destroying the session would keep the table visible on reconnect (see integration
+// reconnection persistence); `pgrollback disconnect` matches the GUI disconnect and is required here.
+func TestBeginCommitCreateThenSessionDisconnectTableGone(t *testing.T) {
+	cfg := getConfigForProxyTest(t)
+	if cfg == nil {
+		return
+	}
+	if !isPostgreSQLAvailable(t, cfg.Postgres.Host, cfg.Postgres.Port, cfg.Postgres.Database, cfg.Postgres.User, cfg.Postgres.Password) {
+		t.Skipf("Skipping test - PostgreSQL is not available at %s:%d", cfg.Postgres.Host, cfg.Postgres.Port)
+		return
+	}
+
+	testID := "test_disconnect_after_user_commit"
+	ctx := context.Background()
+
+	db1, _, proxyServer, cleanup := connectToProxyForTestWithServer(t, testID)
+	defer cleanup()
+
+	tableName := fmt.Sprintf("pgrollback_commit_sess_%d", time.Now().UnixNano())
+
+	createSQL := fmt.Sprintf("CREATE TABLE %s (id INT)", tableName)
+	if _, err := db1.ExecContext(ctx, createSQL); err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	if _, err := db1.ExecContext(ctx, "BEGIN"); err != nil {
+		t.Fatalf("BEGIN: %v", err)
+	}
+	if _, err := db1.ExecContext(ctx, "COMMIT"); err != nil {
+		t.Fatalf("COMMIT: %v", err)
+	}
+
+	// Destroy session on disconnect so the base transaction is rolled back (uncommitted DDL vanishes).
+	if _, err := db1.ExecContext(ctx, "pgrollback disconnect"); err != nil {
+		t.Fatalf("pgrollback disconnect: %v", err)
+	}
+	if err := db1.Close(); err != nil {
+		t.Fatalf("close first connection: %v", err)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	db2 := openDBToProxy(t, proxyServer.ListenHost(), proxyServer.ListenPort(), cfg, "pgrollback_"+testID)
+	defer db2.Close()
+
+	var exists bool
+	err := db2.QueryRowContext(ctx,
+		"SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1)",
+		tableName,
+	).Scan(&exists)
+	if err != nil {
+		t.Fatalf("check table existence: %v", err)
+	}
+	if exists {
+		t.Fatal("table should not exist after reconnect: session was destroyed and base transaction rolled back")
+	}
+}
+
 // TestFullTransactionCommitSucceeds verifies that BEGIN followed by COMMIT completes without error.
 // This depends on the proxy sending ReadyForQuery('T') after BEGIN so that clients that check
 // transaction state (e.g. PDO via PQtransactionStatus) before sending COMMIT will actually send COMMIT.

@@ -461,7 +461,13 @@ const htmlTemplate = `<!DOCTYPE html>
         btn.addEventListener('click', function() {
           var id = this.getAttribute('data-id');
           fetch('__API_BASE__/sessions/clear-history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ test_id: id }) })
-            .then(function(r) { if (r.ok) load(); else r.text().then(function(t) { alert(t); }); });
+            .then(function(r) {
+              if (!r.ok) { r.text().then(function(t) { alert(t); }); return; }
+              // Force fullReplace on the next render so history <ul> and counts match the server (incremental updateRow can miss some shrink cases).
+              lastRenderedSessions = null;
+              load();
+            })
+            .catch(function(e) { alert('Clear log failed: ' + (e && e.message ? e.message : e)); });
         });
       });
       tbody.querySelectorAll('.close-btn').forEach(function(btn) {
@@ -504,6 +510,13 @@ const htmlTemplate = `<!DOCTYPE html>
       }()) : 0;
       if (hist.length > prevLen) {
         for (var j = prevLen; j < hist.length; j++) {
+          var li = document.createElement('li');
+          li.innerHTML = historyItemHtml(hist[j]);
+          ul.appendChild(li);
+        }
+      } else if (hist.length < prevLen || ul.children.length !== hist.length) {
+        ul.innerHTML = '';
+        for (var j = 0; j < hist.length; j++) {
           var li = document.createElement('li');
           li.innerHTML = historyItemHtml(hist[j]);
           ul.appendChild(li);

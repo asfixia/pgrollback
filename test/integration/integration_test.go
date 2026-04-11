@@ -48,14 +48,13 @@ func TestMain(m *testing.M) {
 	// Usa porta da configuração
 	pgrollbackListenPort := cfg.Proxy.ListenPort
 	if pgrollbackListenPort == 0 {
-		// Se não configurada, usa 5433 como padrão para testes
-		pgrollbackListenPort = 5433
+		pgrollbackListenPort = proxy.DefaultListenPort
 	}
 
 	// Avisa se estiver usando porta 5432 (pode conflitar com PostgreSQL real)
 	if pgrollbackListenPort == 5432 {
 		logger.Warn("PgRollback está usando porta 5432, que pode conflitar com PostgreSQL real")
-		logger.Warn("Considere usar uma porta diferente (ex: 5433) para testes")
+		logger.Warn("Considere usar uma porta diferente (ex: 15433) para testes")
 	}
 
 	useExternalServer := os.Getenv("PGROLLBACK_USE_EXTERNAL_SERVER") == "1" || os.Getenv("PGROLLBACK_USE_EXTERNAL_SERVER") == "true"
@@ -969,6 +968,127 @@ func TestInvalidStatements(t *testing.T) {
 	pingWithTimeout(t, pgrollbackDB, 5*time.Second, false, "Connection remains valid after handling invalid statements")
 	// Limpa a transação
 	execPgRollbackRollback(t, pgrollbackDB)
+}
+
+// TestMultiStatementMultiConnectionWorkflow runs BEGIN + CREATE + INSERT in one
+// round-trip on connection A, reads one row, then runs two INSERTs in one
+// round-trip on connection B (same testID / shared session). All rows must be visible.
+func TestMultiStatementMultiConnectionWorkflow(t *testing.T) {
+	testID := "test_multi_stmt_mc"
+	db1 := connectToPgRollbackProxySingleConn(t, testID)
+	defer db1.Close()
+	db2 := connectToPgRollbackProxySingleConn(t, testID)
+	defer db2.Close()
+
+	schema := getTestSchema()
+	tableName := postgres.QuoteQualifiedName(schema, "pgrollback_multi_stmt_mc")
+	dropTableIfExists(t, db1, tableName)
+
+	batch1 := fmt.Sprintf(
+		"BEGIN; CREATE TABLE %s (id SERIAL PRIMARY KEY, value TEXT); INSERT INTO %s (value) VALUES ('batch_first');",
+		tableName, tableName,
+	)
+	if _, err := db1.Exec(batch1); err != nil {
+		t.Fatalf("multi-statement batch on conn1 failed: %v", err)
+	}
+
+	var got string
+	q1 := fmt.Sprintf("SELECT value FROM %s ORDER BY id LIMIT 1", tableName)
+	if err := db1.QueryRow(q1).Scan(&got); err != nil {
+		t.Fatalf("SELECT one row after batch: %v", err)
+	}
+	if got != "batch_first" {
+		t.Fatalf("first row value: got %q want %q", got, "batch_first")
+	}
+
+	batch2 := fmt.Sprintf(
+		"INSERT INTO %s (value) VALUES ('conn2_stmt1'); INSERT INTO %s (value) VALUES ('conn2_stmt2');",
+		tableName, tableName,
+	)
+	if _, err := db2.Exec(batch2); err != nil {
+		t.Fatalf("multi-statement batch on conn2 failed: %v", err)
+	}
+
+	assertTableRowCount(t, db1, tableName, 3, "conn1 sees all rows from batch + conn2 multi-statement")
+	assertTableRowCount(t, db2, tableName, 3, "conn2 sees shared session row count")
+
+	execPgRollbackFullRollback(t, db1)
+	assertTableDoesNotExist(t, db1, tableName, "table gone after pgrollback rollback")
+}
+
+// TestReconnectSameTestIDAfterMissingTableSelect uses one TCP connection to create data,
+// runs SELECT against a non-existent table (expects error), closes the client, then opens
+// a new connection with the same application_name / testID. The shared pgrollback session
+// must still expose the original table so the test can insert and query again.
+func TestReconnectSameTestIDAfterMissingTableSelect(t *testing.T) {
+	testID := "test_reconnect_after_missing_select"
+	schema := getTestSchema()
+	tableName := postgres.QuoteQualifiedName(schema, "pgrollback_reconn_miss_sel")
+	ghostTable := postgres.QuoteQualifiedName(schema, "pgrollback_no_such_tbl_reconn_xyz")
+
+	db1 := connectToPgRollbackProxySingleConn(t, testID)
+	dropTableIfExists(t, db1, tableName)
+	createTableWithValueColumn(t, db1, tableName)
+	insertOneRow(t, db1, tableName, "before_disconnect", "seed row before bad SELECT and disconnect")
+
+	_, errGhost := db1.Exec(fmt.Sprintf("SELECT * FROM %s LIMIT 1", ghostTable))
+	if errGhost == nil {
+		t.Fatal("expected error selecting from non-existent table, got nil")
+	}
+	t.Logf("missing-table SELECT failed as expected: %v", errGhost)
+
+	if err := db1.Close(); err != nil {
+		t.Fatalf("close first connection: %v", err)
+	}
+
+	db2 := connectToPgRollbackProxySingleConn(t, testID)
+	defer db2.Close()
+	pingConnection(t, db2)
+
+	assertTableRowCount(t, db2, tableName, 1, "after reconnect same testID: original row still in shared session")
+	insertOneRow(t, db2, tableName, "after_reconnect", "second row on new connection, same testID")
+	assertTableRowCount(t, db2, tableName, 2, "both rows visible after reconnect")
+
+	execPgRollbackFullRollback(t, db2)
+	assertTableDoesNotExist(t, db2, tableName, "cleanup: table gone after pgrollback rollback")
+}
+
+// TestInvalidStatementThenSubsequentSQLInTransaction checks pgrollback behavior after a failed
+// statement: SafeExec wraps each command in a guard savepoint, so the base transaction is not
+// left aborted (unlike raw PostgreSQL on a single connection). The next command should succeed.
+func TestInvalidStatementThenSubsequentSQLInTransaction(t *testing.T) {
+	testID := "test_aborted_after_invalid_sql"
+	db := connectToPgRollbackProxySingleConn(t, testID)
+	defer db.Close()
+
+	schema := getTestSchema()
+	tableName := postgres.QuoteQualifiedName(schema, "pgrollback_aborted_invalid")
+	dropTableIfExists(t, db, tableName)
+
+	execBegin(t, db, "start nested txn for invalid-then-followup test")
+	createTableWithValueColumn(t, db, tableName)
+	insertOneRow(t, db, tableName, "ok_before_bad", "valid insert before syntax error")
+
+	_, errBad := db.Exec("SELECT * FROM WHERE invalid_syntax_aborted_test")
+	if errBad == nil {
+		t.Fatal("expected syntax error from invalid SQL, got nil")
+	}
+	t.Logf("invalid SQL failed as expected: %v", errBad)
+
+	_, errNext := db.Exec("SELECT 1")
+	if errNext != nil {
+		t.Fatalf("expected follow-up SELECT 1 to succeed (pgrollback isolates failed statement): %v", errNext)
+	}
+
+	assertQueryCount(t, db, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE value = 'ok_before_bad'", tableName), 1, "row still visible after failed statement")
+
+	execRollbackOrFail(t, db)
+
+	if _, err := db.Exec("SELECT 1"); err != nil {
+		t.Fatalf("after ROLLBACK, simple SELECT should succeed: %v", err)
+	}
+
+	execPgRollbackFullRollback(t, db)
 }
 
 // TestIsolatedRollbackPerBegin valida COMMIT/ROLLBACK com regras de um único nível:

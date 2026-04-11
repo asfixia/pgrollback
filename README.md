@@ -1,341 +1,213 @@
 
 # pgrollback
 
-**pgrollback** is a PostgreSQL transactional proxy designed for integration and functional testing.
-
-It allows your application to execute real database writes while guaranteeing that nothing is permanently committed.
-
-Tests run against a real PostgreSQL database. All changes are automatically rolled back.
+PostgreSQL proxy for **integration and functional tests**: your app talks to a real database, but writes are not permanently committed. One long-lived backend transaction per test session; client `BEGIN` / `COMMIT` / `ROLLBACK` are mapped to savepoints.
 
 ---
 
-# Why pgrollback exists
+## Contents
 
-Integration tests modify the database.
-
-Traditional solutions have limitations:
-
-- resetting database between tests is slow
-- using test databases is complex
-- transactions only work per connection
-- modern applications use multiple connections and connection pools
-
-PostgreSQL transactions belong to a single connection.
-
-pgrollback solves this by virtualizing transactions across multiple connections.
-
----
-
-# Key features
-
-- works with any PostgreSQL client
-- supports connection pools
-- supports multiple connections per test
-- automatic rollback
-- no cleanup scripts required
-- no test database required
-- no schema cloning required
-- fully transparent to application
-- uses real PostgreSQL engine
+- [Why use it](#why-use-it)
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Quick start](#quick-start)
+- [Run the proxy](#run-the-proxy)
+- [Connect from tests](#connect-from-tests)
+- [Special commands](#special-commands)
+- [Build](#build)
+- [Running tests](#running-tests)
+- [Configuration](#configuration)
+- [Transaction mapping](#transaction-mapping)
+- [Language examples](#language-examples)
+- [SQL log GUI](#sql-log-gui)
+- [CI sketch](#ci-sketch)
+- [Safety](#safety)
+- [License](#license)
 
 ---
 
-# Architecture
+## Why use it
 
-Application connects to pgrollback instead of PostgreSQL:
+Integration tests change the database. Common pain points:
 
-```
-Application
-    │
-    ▼
-pgrollback proxy
-    │
-    ▼
-PostgreSQL
-```
+- Resetting or cloning the DB between tests is slow or heavy.
+- A SQL transaction is **one connection**; apps use **pools and many connections**.
 
-pgrollback opens one real transaction and keeps it alive.
-
-Application COMMIT and ROLLBACK are converted to savepoint operations.
+pgrollback keeps **one real PostgreSQL transaction** on the server side and exposes normal `BEGIN` / `COMMIT` / `ROLLBACK` to clients via savepoints, so multiple connections can share the same logical test session.
 
 ---
 
-# Transaction virtualization example
+## Features
 
-Application code:
-
-```sql
-BEGIN;
-INSERT INTO users(name) VALUES('Alice');
-COMMIT;
-
-BEGIN;
-INSERT INTO users(name) VALUES('Bob');
-ROLLBACK;
-```
-
-Internally pgrollback executes:
-
-```sql
-BEGIN;
-
-SAVEPOINT pgrollback_v_1;
-INSERT INTO users(name) VALUES('Alice');
-RELEASE SAVEPOINT pgrollback_v_1;
-
-SAVEPOINT pgrollback_v_2;
-INSERT INTO users(name) VALUES('Bob');
-ROLLBACK TO SAVEPOINT pgrollback_v_2;
-RELEASE SAVEPOINT pgrollback_v_2;
-```
-
-Guaranteed final database state after test ends or the server is closed:
-
-```sql
-ROLLBACK;
-```
-
-Database returns to original state.
+- Any PostgreSQL client (wire protocol).
+- Connection pools and multiple connections per test ID.
+- Automatic rollback when the session ends; no extra cleanup scripts.
+- Real PostgreSQL execution (not mocked SQL).
+- Optional web GUI for queries on the same listen port.
 
 ---
 
-# Realtime SQL log:
-
-We included an GUI for check the queries runned against the proxy (everything running on just one port only)
-
-![GUI for pgrollback logs](doc/log_sql_commands.png)
-
-# Run:
+## How it works
 
 ```
-./bin/pgrollback --config config/pgrollback.yaml
+Your app  →  pgrollback (proxy)  →  PostgreSQL
 ```
+
+The proxy holds **one** long-lived transaction to Postgres. Application `COMMIT` does **not** commit that base transaction—it becomes `RELEASE SAVEPOINT` (and similar for `ROLLBACK`).
+
+Example:
+
+| Your app | On PostgreSQL (conceptually) |
+|----------|--------------------------------|
+| `BEGIN; INSERT …; COMMIT;` | `SAVEPOINT pgrollback_v_1; INSERT …; RELEASE SAVEPOINT pgrollback_v_1;` |
+| `BEGIN; INSERT …; ROLLBACK;` | `SAVEPOINT …; INSERT …; ROLLBACK TO SAVEPOINT …; RELEASE …;` |
+
+When the test finishes (or you issue a full rollback command), the sandbox is discarded—**no permanent writes**.
 
 ---
-
-# Configuration
-
-Example config:
-
-```yaml
-postgres:
-  host: localhost
-  port: 5432
-  database: mydb
-  user: postgres
-  password: password
-
-proxy:
-  listen_host: 0.0.0.0
-  listen_port: 6432
-
-logging:
-  level: INFO
-```
-
----
-
-# Usage
-
-Connect application to pgrollback:
-
-```
-host=localhost
-port=6432
-application_name=pgrollback_test1
-```
-
-Run tests normally.
-
-Reset sandbox manually:
-
-```
-pgrollback rollback
-```
-
----
-
-# Language examples
-
-## Python
-
-```python
-import psycopg
-
-conn = psycopg.connect(
-    host="localhost",
-    port=6432,
-    dbname="mydb",
-    application_name="pgrollback_test1"
-)
-
-conn.execute("INSERT INTO users VALUES (1)")
-```
-
-## Go
-
-```go
-connStr := "host=localhost port=6432 user=postgres dbname=mydb application_name=pgrollback_test1"
-
-db, _ := sql.Open("postgres", connStr)
-
-db.Exec("INSERT INTO users VALUES (1)")
-```
-
-## Node.js
-
-```js
-const client = new Client({
-  host: 'localhost',
-  port: 6432,
-  application_name: 'pgrollback_test1'
-})
-```
-
-## PHP
-
-```php
-$pdo = new PDO("pgsql:host=localhost;port=6432;dbname=mydb");
-$pdo->exec("SET application_name='pgrollback_test1'");
-```
-
----
-
-# pgrollback commands
-
-| Command | Description |
-|--------|-------------|
-| **pgrollback rollback** | Rolls back the **entire** base transaction for this testID and starts a new one. Use to reset the sandbox to a clean state within the same test or before the next test. |
-| **pgrollback status** | Returns a result set: `test_id`, `active` (whether there is an active transaction), `level` (savepoint level), `created_at`. |
-| **pgrollback list** | Returns one row per session: `test_id`, `active`, `level`, `created_at`. |
-| **pgrollback cleanup** | Drops expired sessions (based on proxy timeout); returns a single number `cleaned`. |
-
-Example: `db.Exec("pgrollback rollback")` (or equivalent in your language) to reset the sandbox.
-
----
-
-# CI example
-
-```
-pgrollback --config config.yaml &
-
-run migrations
-
-run tests
-
-pgrollback rollback
-
-kill pgrollback
-```
-
----
-
-# Safety
-
-Use only on test databases.
-
-Do not use on production.
-
-pgrollback keeps long transactions open.
-
----
-
-# License
-
-Apache License 2.0. See [LICENSE](LICENSE) for the full text.
-
-# Build
-
-### Requirements: CGO and MinGW64 (Windows)
-
-- Go 1.23+
-
-```
-go build -o bin/pgrollback ./cmd/pgrollback
-```
-
-This project uses **cgo** for the SQL parser (`github.com/pganalyze/pg_query_go/v5`). On Windows you need a **64‑bit MinGW** toolchain so that `go build` can compile the C parts.
-
-- **Install:** e.g. [MSYS2](https://www.msys2.org/) and then `pacman -S mingw-w64-x86_64-gcc` so that `C:\msys64\mingw64\bin` contains `x86_64-w64-mingw32-gcc.exe`.
-- **Configure:** Run **setEnvironments.bat** before building (it adds `C:\msys64\mingw64\bin` to `PATH` and sets `CC`/`CXX` and `CGO_ENABLED=1`). In Cursor/VS Code, the workspace settings (`.vscode/settings.json`) can inject this environment into the integrated terminal so new terminals are ready for `go build`.
-- **Verify:** In a terminal where the environment is set, run `where x86_64-w64-mingw32-gcc` and `go build ./pkg/sql/...`. The first cgo build may take 1–2 minutes.
-
-Without a 64‑bit MinGW `gcc`, you may see errors like `sorry, unimplemented: 64-bit mode not compiled in`.
-
-### Go / Makefile (cross-platform)
-
-- **Build:** `go build -o bin/pgrollback ./cmd/pgrollback` or `make build` (outputs `bin/pgrollback`).
-- **Run:** `./bin/pgrollback` or `make run`. Optional first argument: path to config file; otherwise config is discovered (see [Configuration](#configuration)).
-
-### Windows .bat scripts
-
-- **setEnvironments.bat** — Sets up the Go environment (PATH, GOROOT, **MinGW64 for cgo**) so that `go build` and tests can run. Run it in a new shell before building, or use the “Go+MinGW” terminal profile in Cursor so the integrated terminal gets the same environment.
-- **build.bat** — Calls `setEnvironments.bat`, then builds `bin\pgrollback.exe` with `-H windowsgui` (no console window; app lives in the system tray).
-- **run.bat** — Calls `setEnvironments.bat`, then runs `bin\pgrollback.exe`.
-
-#### Windows system tray (no console window)
-
-On Windows, the main binary is built as a **GUI application** (no console window). When you start `pgrollback.exe`:
-
-- A **tray icon** appears (near the clock) instead of a visible console.
-- **Right‑click** the icon to:
-  - **Open GUI** — launches your browser to the configured GUI URL (typically `http://<listen_host>:<listen_port>/`).
-  - **Quit** — cleanly stops the proxy server and exits the app.
-
-For debugging or logs from the console, you can still run:
-
-- `go run ./cmd/pgrollback`  
-- or `go build -o bin/pgrollback.exe ./cmd/pgrollback` (without `-H windowsgui`) and then run that binary from a terminal.
-
-### Tests
-
-- **test.bat** — Sets `pgrollback_CONFIG` (default `config\pgrollback.yaml` if unset), runs unit tests then integration tests (`-tags=integration`). Logs to `test_results_*.log`.
-- **test-unit.bat** — Unit tests only; `-timeout 120s`, `-parallel 1` by default; prints a short report.
-- **test-integration.bat** — Integration tests; requires a running PostgreSQL and valid config. Optional argument: test name for `-run`. Prints a short report.
-
-Integration tests require a running PostgreSQL and a config (or environment variables) pointing at it.
 
 ## Quick start
 
-1. **Install Go** (1.23+).
-2. **Copy and edit the config** — e.g. copy `config/pgrollback.yaml` and set `postgres` (host, port, database, user, password) and `proxy` (listen_host, listen_port) to match your environment.
-3. **Build and run the proxy:**  
-   `make build && make run` (or on Windows: `build.bat` then `run.bat`).
-4. **Point your tests at the proxy** — Use the proxy’s host and port as the database host/port in your test DSN. Set `application_name=pgrollback_<testID>` so the proxy associates the connection with a session (see [Connecting from your tests](#connecting-from-your-tests)).
+1. **Install Go** (1.23+) and, on Windows for this repo, a **64-bit MinGW** toolchain for CGO (see [Build](#build)).
+2. **Config** — Copy `config/pgrollback.yaml` and set `postgres.*` and `proxy.listen_*` for your machine.
+3. **Run the proxy** — `make run` or `./bin/pgrollback --config config/pgrollback.yaml` (Windows: `build.bat` / `run.bat` after `setEnvironments.bat`).
+4. **Point tests at the proxy** — Use the proxy host/port as the DB endpoint and set `application_name` to `pgrollback_<testID>` so sessions are isolated (see below).
 
-Your test process (e.g. PHP, Python, any PostgreSQL client) connects to the proxy; the proxy holds one long-lived transaction per testID and never commits it.
+---
+
+## Run the proxy
+
+```bash
+./bin/pgrollback --config config/pgrollback.yaml
+```
+
+**Windows (tray build):** `build.bat` produces a GUI-subsystem binary (tray icon, no console). For console logs, use `go run ./cmd/pgrollback` or build without `-H windowsgui`. Right‑click the tray icon → **Open GUI** / **Quit**.
+
+---
+
+## Connect from tests
+
+Use the **proxy** port (not the raw Postgres port) and a stable **test id** via `application_name`:
+
+```text
+host = <proxy listen_host>
+port = <proxy listen_port>
+application_name = pgrollback_<your_test_id>
+```
+
+Same `test_id` across connections = same sandbox (shared logical transaction). Different `test_id` = isolated sandboxes.
+
+To reset a sandbox without reconnecting, execute the SQL string `pgrollback rollback` (see [Special commands](#special-commands)).
+
+---
+
+## Special commands
+
+Send as a **single statement** through the connection to the proxy (not forwarded as normal DDL/DML). The test id comes from `application_name`.
+
+| Command | Purpose |
+|--------|---------|
+| `pgrollback rollback` | Roll back the **entire** base transaction for this test id and start a new one (reset sandbox). |
+| `pgrollback status` | Result columns include `test_id`, `active`, `level`, `created_at`. |
+| `pgrollback list` | One row per session (`test_id`, `active`, `level`, `created_at`). |
+| `pgrollback cleanup` | Remove expired sessions; returns how many were cleaned. |
+| `pgrollback disconnect` | (Used by tests/tools) disconnect flow for a session. |
+
+Example: `db.Exec("pgrollback rollback")` in Go, or the equivalent in your stack.
+
+---
+
+## Build
+
+### Requirements
+
+- **Go 1.23+**
+- **CGO** — This project uses `github.com/pganalyze/pg_query_go/v5` (C extension).
+
+**Windows:** install a **64-bit MinGW** GCC (e.g. MSYS2: `pacman -S mingw-w64-x86_64-gcc`), then run **`setEnvironments.bat`** so `PATH`, `CC`, `CXX`, and `CGO_ENABLED=1` are set. See `.vscode/settings.json` for terminal integration.
+
+```bash
+go build -o bin/pgrollback ./cmd/pgrollback
+# or
+make build
+```
+
+Without a proper 64-bit `gcc`, you may see errors like `sorry, unimplemented: 64-bit mode not compiled in`.
+
+---
+
+## Running tests
+
+### What runs where
+
+| Suite | Packages | Needs PostgreSQL? | Build tag |
+|-------|----------|-------------------|-----------|
+| **Unit** | `./pkg/...`, `./internal/...`, `./tests/unit/...` | No (except some `tests/unit/proxy` tests that skip if DB missing) | *(none)* |
+| **Integration** | `./test/integration/...` | **Yes** — real server + config | `-tags=integration` |
+
+Integration tests start their own proxy via `TestMain`; they use **`PGTEST_CONFIG`** (default `config/pgtest-sandbox.yaml` when using `test.bat`) and **`PGROLLBACK_LISTEN_HOST` / `PGROLLBACK_LISTEN_PORT`** for the proxy listen address.
+
+### Windows (`test.bat`)
+
+`test.bat` calls `setEnvironments.bat` first. Arguments can appear in any order.
+
+| You type | What happens |
+|----------|----------------|
+| `test.bat` | Unit tests → integration tests; output in **`test_results_unit.log`** and **`test_results_integration.log`**. |
+| `test.bat` `detailed` | Same suites, output on the **console** (no log files). |
+| `test.bat` `unit` | Only unit tests. |
+| `test.bat` `integration` | Only integration tests. |
+| `test.bat` `integration` `TestProtectionAgainstAccidentalCommit` | One integration test (substring match for `-run`). |
+| `test.bat` `integration` `detailed` `TestIsolationBetweenTestIDs` | One test, console output. |
+| `test.bat` `all` | Same as default: unit + integration. |
+
+If **`PGROLLBACK_LISTEN_PORT`** is already in use on `PGROLLBACK_LISTEN_HOST`, the script sets port to **`1` + original port** (e.g. `5433` → `15433`) and prints a message.
+
+**Examples (integration test names from this repo):**
+
+```bat
+test.bat unit detailed
+test.bat integration detailed TestProtectionAgainstAccidentalCommit
+test.bat integration detailed TestTransactionSharing
+test.bat integration TestMultiStatementMultiConnectionWorkflow
+```
+
+### Linux / macOS
+
+```bash
+go test -count=1 ./pkg/... ./internal/... ./tests/unit/...
+go test -count=1 ./test/integration/... -tags=integration
+# or
+make test-unit      # pkg + internal only — add ./tests/unit/... for parity with test.bat
+make test-integration
+```
+
+More detail (debugging, Cursor launch configs): **[TESTING.md](TESTING.md)**.
+
+---
 
 ## Configuration
 
-- **Config file:** By default the binary looks for `config/pgrollback.yaml` (relative to the working directory or next to the executable). Override with the `pgrollback_CONFIG` environment variable or by passing the config path as the first argument to the binary.
-- **Structure:** The config has four main sections:
-  - **postgres** — Connection to the real PostgreSQL: `host`, `port`, `database`, `user`, `password`, `session_timeout`.
-  - **proxy** — How the proxy listens: `listen_host`, `listen_port`, `timeout`, `keepalive_interval`.
-  - **logging** — `level` (DEBUG, INFO, WARN, ERROR), `file` (empty = stderr).
-  - **test** — Optional test defaults: `schema`, `context_timeout`, `query_timeout`, `ping_timeout`.
+Default config path: **`config/pgrollback.yaml`** (or first CLI argument, or `pgrollback_CONFIG` env).
 
-The proxy speaks the PostgreSQL wire protocol. Clients connect to the proxy (using `proxy.listen_host` and `proxy.listen_port`); the proxy connects to the real database using the `postgres` settings and runs all commands inside a single transaction per session.
+Main blocks:
 
-## pgrollback commands
+- **`postgres`** — Real server: `host`, `port`, `database`, `user`, `password`, `session_timeout`, …
+- **`proxy`** — Listen address: `listen_host`, `listen_port`, timeouts, keepalive.
+- **`logging`** — `level`, optional `file`.
+- **`test`** — Defaults used by tests/tools: `schema`, timeouts, etc.
 
-These are custom “queries” sent to the proxy (as a single statement). The proxy interprets them and does not forward them as normal SQL. The testID is taken from the connection’s `application_name` (`pgrollback_<testID>`).
+Clients connect to **`proxy.listen_*`**; the proxy connects upstream using **`postgres.*`**.
 
+---
 
+## Transaction mapping
 
-## TCL transformed into savepoint logic
+- **`BEGIN`** — Ensures a base transaction, then **`SAVEPOINT pgrollback_v_N`** (N increases for nested logical transactions).
+- **`COMMIT`** — **`RELEASE SAVEPOINT pgrollback_v_N`**; the base transaction is **never** committed by the app.
+- **`ROLLBACK`** (plain, not `ROLLBACK TO SAVEPOINT`) — **`ROLLBACK TO SAVEPOINT`** + **`RELEASE SAVEPOINT`** for the current user savepoint, or no-op at level 0.
 
-The proxy intercepts transaction control statements and converts them into PostgreSQL savepoint operations so that the **base** transaction is never committed or rolled back from the application’s perspective; only logical “nested” transactions are.
-
-- **BEGIN**  
-  If there is no base transaction yet, the proxy ensures one is started. Then it sends **SAVEPOINT pgrollback_v_N** to PostgreSQL, where **N** is the current savepoint level (1-based after the first BEGIN). The level is incremented for the next BEGIN. So: first BEGIN → base tx (if needed) + `SAVEPOINT pgrollback_v_1`; second BEGIN → `SAVEPOINT pgrollback_v_2`, and so on.
-
-- **COMMIT**  
-  Converted to **RELEASE SAVEPOINT pgrollback_v_N** (release the current savepoint and decrement the level). If the level is already 0, no SQL is sent; the proxy returns success. The base transaction is **never** committed.
-
-- **ROLLBACK** (plain `ROLLBACK`, not `ROLLBACK TO SAVEPOINT`)  
-  If level > 0: the proxy sends **ROLLBACK TO SAVEPOINT pgrollback_v_N; RELEASE SAVEPOINT pgrollback_v_N** and decrements the level. If level = 0: no SQL is sent. So application ROLLBACK only undoes work since the last BEGIN (savepoint), not the whole session.
-
-User-issued **SAVEPOINT**, **RELEASE SAVEPOINT**, and **ROLLBACK TO SAVEPOINT** are passed through and executed inside a guard so that a failure does not abort the main transaction.
+User-defined **`SAVEPOINT` / `RELEASE` / `ROLLBACK TO SAVEPOINT`** are passed through with guarding so failures do not abort the whole session transaction.
 
 ```mermaid
 flowchart LR
@@ -344,18 +216,85 @@ flowchart LR
     B[COMMIT]
     C[ROLLBACK]
   end
-  subgraph proxy [pgrollback proxy]
+  subgraph proxy [pgrollback]
     A2[SAVEPOINT pgrollback_v_N]
-    B2[RELEASE SAVEPOINT pgrollback_v_N]
-    C2[ROLLBACK TO SAVEPOINT + RELEASE]
+    B2[RELEASE SAVEPOINT]
+    C2[ROLLBACK TO + RELEASE]
   end
   subgraph db [PostgreSQL]
-    TX[Single long-lived transaction]
+    TX[Long-lived transaction]
   end
-  A --> A2
-  B --> B2
-  C --> C2
-  A2 --> TX
-  B2 --> TX
-  C2 --> TX
+  A --> A2 --> TX
+  B --> B2 --> TX
+  C --> C2 --> TX
 ```
+
+---
+
+## Language examples
+
+**Python**
+
+```python
+import psycopg
+conn = psycopg.connect(
+    host="localhost", port=6432, dbname="mydb",
+    application_name="pgrollback_test1",
+)
+conn.execute("INSERT INTO users VALUES (1)")
+```
+
+**Go**
+
+```go
+connStr := "host=localhost port=6432 user=postgres dbname=mydb application_name=pgrollback_test1"
+db, _ := sql.Open("postgres", connStr)
+db.Exec("INSERT INTO users VALUES (1)")
+```
+
+**Node.js**
+
+```js
+const client = new Client({
+  host: 'localhost', port: 6432, application_name: 'pgrollback_test1',
+})
+```
+
+**PHP**
+
+```php
+$pdo = new PDO("pgsql:host=localhost;port=6432;dbname=mydb");
+$pdo->exec("SET application_name='pgrollback_test1'");
+```
+
+---
+
+## SQL log GUI
+
+The proxy can serve a small web UI (same listen port) to inspect queries:
+
+![GUI for pgrollback logs](doc/log_sql_commands.png)
+
+---
+
+## CI sketch
+
+```bash
+pgrollback --config config.yaml &
+run migrations
+run tests
+pgrollback rollback   # optional explicit reset
+kill pgrollback
+```
+
+---
+
+## Safety
+
+Use **only on test databases**. Do not point production traffic here—the proxy keeps long transactions open.
+
+---
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).

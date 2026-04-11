@@ -75,59 +75,6 @@ func SafeQuery(
 	}, nil
 }
 
-// func execQuerySafeSavepoint(ctx context.Context, tx pgxQueryer, query string) (tag pgconn.CommandTag, err error) {
-// 	savepointName := newGuardSavepointName()
-// 	// Cria um savepoint interno antes de executar o comando.
-// 	// Se o comando falhar, fazemos rollback para este savepoint para não abortar a transação principal.
-// 	if _, err = tx.Exec(ctx, "SAVEPOINT "+savepointName); err != nil {
-// 		log.Printf("[PROXY] - Falha ao criar savepoint de guarda: %v", err)
-// 		return tag, fmt.Errorf("falha interna de transação: %w", err)
-// 	}
-
-// 	// Finaliza o guard automaticamente:
-// 	// - pânico -> rollback+release e repanica
-// 	// - erro   -> rollback+release e retorna erro original
-// 	// - ok     -> release
-// 	defer func() {
-// 		if p := recover(); p != nil {
-// 			if guardErr := rollbackToAndReleaseSavepoint(ctx, tx, savepointName); guardErr != nil {
-// 				log.Printf("[PROXY] FATAL: Falha ao reverter savepoint de guarda após pânico: %v", guardErr)
-// 			}
-// 			panic(p)
-// 		}
-
-// 		if err != nil {
-// 			if guardErr := rollbackToAndReleaseSavepoint(ctx, tx, savepointName); guardErr != nil {
-// 				log.Printf("[PROXY] FATAL: Falha ao reverter savepoint de guarda: %v", guardErr)
-// 			}
-// 			return
-// 		}
-
-// 		if releaseErr := releaseSavepoint(ctx, tx, savepointName); releaseErr != nil {
-// 			log.Printf("[PROXY] Aviso: Falha ao liberar savepoint de guarda: %v", releaseErr)
-// 		}
-// 	}()
-
-// 	tag, err = tx.Exec(ctx, query)
-// 	if err != nil {
-// 		// Retorna o erro original do comando para o cliente (a reversão ocorre no defer).
-// 		log.Printf("[PROXY] Erro na execução (revertendo guarda): %v", err)
-// 		return tag, fmt.Errorf("falha ao executar comando: %w", err)
-// 	}
-
-// 	return tag, nil
-// }
-
-// func rollbackToAndReleaseSavepoint(ctx context.Context, tx pgxQueryer, savepointName string) error {
-// 	if _, err := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+savepointName); err != nil {
-// 		return err
-// 	}
-// 	if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT "+savepointName); err != nil {
-// 		return err
-// 	}
-// 	return nil
-// }
-
 func releaseSavepoint(ctx context.Context, tx pgxQueryer, savepointName string) error {
 	_, err := tx.Exec(ctx, "RELEASE SAVEPOINT "+savepointName)
 	return err

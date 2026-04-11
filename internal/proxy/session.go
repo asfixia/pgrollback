@@ -62,6 +62,30 @@ func (s *TestSession) GetLastQueryDuration() string {
 	return s.DB.Gui.GetLastQueryDuration()
 }
 
+// GUIQueryHistory returns a copy of the session query log in the same order as the GUI list (oldest first).
+func (s *TestSession) GUIQueryHistory() []QueryHistoryEntry {
+	if s == nil || s.DB == nil {
+		return nil
+	}
+	return s.DB.Gui.GetQueryHistory()
+}
+
+// GUILastQuery returns the text of the last logged query (GUI “last query” column).
+func (s *TestSession) GUILastQuery() string {
+	if s == nil || s.DB == nil {
+		return ""
+	}
+	return s.DB.Gui.GetLastQuery()
+}
+
+// ClearGUIQueryHistory clears the query log, same effect as POST /api/sessions/clear-history for this session.
+func (s *TestSession) ClearGUIQueryHistory() {
+	if s == nil || s.DB == nil {
+		return
+	}
+	s.DB.Gui.ClearQueryHistory()
+}
+
 func (p *PgRollback) GetTestID(session *TestSession) string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

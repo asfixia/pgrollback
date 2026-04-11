@@ -27,6 +27,43 @@ func (p *PgRollback) InterceptQuery(testID string, query string, connID Connecti
 		return p.interceptPgRollbackCommand(testID, queryTrimmed)
 	}
 
+	// Multi-statement simple query starting with BEGIN: intercept only the first statement.
+	// Otherwise ParseStatements sees BEGIN first and InterceptQuery would replace the entire
+	// string with SAVEPOINT, dropping CREATE TABLE / INSERT / etc.
+	parts := sql.SplitCommandsFallback(queryTrimmed)
+	var nonEmpty []string
+	for _, part := range parts {
+		if t := strings.TrimSpace(part); t != "" {
+			nonEmpty = append(nonEmpty, t)
+		}
+	}
+	if len(nonEmpty) >= 2 {
+		first := nonEmpty[0]
+		firstUpper := strings.ToUpper(first)
+		if strings.HasPrefix(firstUpper, "BEGIN") && !strings.Contains(firstUpper, "SAVEPOINT") {
+			isBegin := false
+			if stmts1, err1 := sql.ParseStatements(first); err1 == nil && len(stmts1) > 0 && stmts1[0].Stmt != nil {
+				if sql.IsTransactionBegin(stmts1[0].Stmt) {
+					isBegin = true
+				}
+			}
+			if !isBegin && strings.HasPrefix(strings.TrimSpace(firstUpper), "BEGIN") {
+				isBegin = true
+			}
+			if isBegin {
+				rewrittenFirst, err := p.interceptBegin(testID, connID)
+				if err != nil {
+					return "", err
+				}
+				rest := strings.Join(nonEmpty[1:], "; ")
+				if rest == "" {
+					return rewrittenFirst, nil
+				}
+				return rewrittenFirst + "; " + rest, nil
+			}
+		}
+	}
+
 	stmts, err := sql.ParseStatements(query)
 	if err == nil && len(stmts) > 0 && stmts[0].Stmt != nil {
 		stmt := stmts[0].Stmt

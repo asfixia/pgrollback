@@ -127,6 +127,43 @@ func (d *realSessionDB) execTxLocked(ctx context.Context, sql string) (pgconn.Co
 	return tag, err
 }
 
+// runWithSavepointGuardLocked wraps fn() in a SAVEPOINT/ROLLBACK TO SAVEPOINT/RELEASE SAVEPOINT
+// guard so that a failure inside fn() does not leave the base transaction in an aborted state
+// (SQLSTATE 25P02). Typical use: wrapping pgConn.Prepare() or any low-level backend call that
+// runs directly through pgconn (bypassing SafeExec's own guard).
+//
+// If the SAVEPOINT cannot be created the function still calls fn() — best-effort behaviour so a
+// temporary failure to create the savepoint does not block the operation entirely.
+//
+// Caller must hold d.mu (via LockRun).
+func (d *realSessionDB) runWithSavepointGuardLocked(ctx context.Context, savepointName string, fn func() error) error {
+	_, spErr := d.execTxLocked(ctx, "SAVEPOINT "+savepointName)
+	guardActive := spErr == nil
+	if !guardActive {
+		log.Printf("[PROXY] Savepoint guard %q could not be created (running without guard): %v", savepointName, spErr)
+	}
+
+	fnErr := fn()
+
+	if fnErr != nil {
+		if guardActive {
+			if _, rbErr := d.execTxLocked(ctx, "ROLLBACK TO SAVEPOINT "+savepointName); rbErr != nil {
+				log.Printf("[PROXY] Failed to roll back savepoint guard %q: %v", savepointName, rbErr)
+			} else if _, relErr := d.execTxLocked(ctx, "RELEASE SAVEPOINT "+savepointName); relErr != nil {
+				log.Printf("[PROXY] Failed to release savepoint guard %q after rollback: %v", savepointName, relErr)
+			}
+		}
+		return fnErr
+	}
+
+	if guardActive {
+		if _, relErr := d.execTxLocked(ctx, "RELEASE SAVEPOINT "+savepointName); relErr != nil {
+			log.Printf("[PROXY] Failed to release savepoint guard %q on success: %v", savepointName, relErr)
+		}
+	}
+	return nil
+}
+
 // HasOpenUserTransaction returns true if a connection has started a user transaction (BEGIN)
 // and not yet committed or rolled back.
 func (d *realSessionDB) HasOpenUserTransaction() bool {

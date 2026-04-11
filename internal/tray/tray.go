@@ -39,11 +39,18 @@ func proxyAddressFromGUIURL(guiURL string) string {
 }
 
 func onReady(guiURL string) {
+	systray.SetOnTrayLeftDoubleClick(func() {
+		openBrowser(guiURL)
+	})
 	// Custom icon built at runtime (PostgreSQL-inspired blue with \"PT\" letters).
 	systray.SetIcon(generateIconBase64())
 	systray.SetTitle("PgRollback")
 	proxyAddr := proxyAddressFromGUIURL(guiURL)
-	systray.SetTooltip(fmt.Sprintf("PgRollback Proxy – %s", proxyAddr))
+	tip := fmt.Sprintf("PgRollback Proxy – %s", proxyAddr)
+	if runtime.GOOS == "windows" {
+		tip += " · double-click: open GUI · right-click: menu"
+	}
+	systray.SetTooltip(tip)
 
 	mOpen := systray.AddMenuItem(fmt.Sprintf("Open GUI \"%s\"", guiURL), "Open PgRollback GUI in the browser")
 	mRollbackAll := systray.AddMenuItem("Rollback All", "Rollback all sessions (keep connections)")

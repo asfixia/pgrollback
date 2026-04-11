@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -26,6 +27,37 @@ func recoverSessionTxAfterDirectExec(session *TestSession) {
 	if err := session.DB.startNewTx(session.Context()); err != nil {
 		log.Printf("[PROXY] Recover tx after direct exec error: %v", err)
 	}
+}
+
+// multiCommandBatchNeedsSequentialExec is true when the batch contains client transaction
+// control (BEGIN/COMMIT/ROLLBACK) that must be rewritten per statement. A single pgConn.Exec
+// of the full string would send raw COMMIT to PostgreSQL and end the session transaction.
+func multiCommandBatchNeedsSequentialExec(commands []string) bool {
+	for _, cmd := range commands {
+		c := strings.TrimSpace(cmd)
+		if c == "" {
+			continue
+		}
+		stmts, err := sql.ParseStatements(c)
+		if err == nil && len(stmts) > 0 && stmts[0].Stmt != nil {
+			s := stmts[0].Stmt
+			if sql.IsTransactionCommit(s) || sql.IsTransactionBegin(s) || sql.IsTransactionRollback(s) {
+				return true
+			}
+			continue
+		}
+		u := strings.ToUpper(c)
+		if strings.HasPrefix(u, "COMMIT") {
+			return true
+		}
+		if strings.HasPrefix(u, "BEGIN") && !strings.Contains(u, "SAVEPOINT") {
+			return true
+		}
+		if strings.HasPrefix(u, "ROLLBACK") && !strings.Contains(u, "TO SAVEPOINT") {
+			return true
+		}
+	}
+	return false
 }
 
 // ExecuteInterpretedQuery recebe uma query que já passou por parse e interceptação.
@@ -141,6 +173,12 @@ func (p *proxyConnection) ForwardCommandToDB(testID string, query string, sendRe
 		return fmt.Errorf("sessão não encontrada para testID: %s", testID)
 	}
 
+	intercepted, err := p.server.PgRollback.InterceptQuery(testID, query, p.connectionID())
+	if err != nil {
+		return err
+	}
+	query = intercepted
+
 	// All commands run inside the transaction (session.DB uses tx for Query/Exec).
 	if !session.DB.HasActiveTransaction() {
 		return fmt.Errorf("sessão sem transação ativa para testID: %s", testID)
@@ -159,7 +197,6 @@ func (p *proxyConnection) ForwardCommandToDB(testID string, query string, sendRe
 	}
 
 	var tag pgconn.CommandTag
-	var err error
 
 	log.Printf("[PROXY] ForwardCommandToDB: Executando via transação: %s", query)
 	session.DB.Gui.SetLastQuery(query)
@@ -256,6 +293,66 @@ func (p *proxyConnection) ForwardCommandToDB(testID string, query string, sendRe
 	return nil
 }
 
+// safeForwardMultipleCommandsSequential runs each statement through ForwardCommandToDB so InterceptQuery
+// rewrites COMMIT/BEGIN/ROLLBACK. LockRun cannot be held across ForwardCommandToDB (SafeExec also locks d.mu).
+func (p *proxyConnection) safeForwardMultipleCommandsSequential(
+	testID string,
+	commands []string,
+	sendReadyForQuery bool,
+	ctx context.Context,
+	session *TestSession,
+	multiCommandSavepointName string,
+	start time.Time,
+) error {
+	session.DB.LockRun()
+	if _, err := session.DB.execTxLocked(ctx, "SAVEPOINT "+multiCommandSavepointName); err != nil {
+		session.DB.UnlockRun()
+		return fmt.Errorf("criar savepoint para múltiplos comandos: %w", err)
+	}
+	session.DB.UnlockRun()
+
+	var nonEmpty []string
+	for _, cmd := range commands {
+		if t := strings.TrimSpace(cmd); t != "" {
+			nonEmpty = append(nonEmpty, t)
+		}
+	}
+
+	rollbackMulti := func() {
+		session.DB.LockRun()
+		_, _ = session.DB.execTxLocked(ctx, "ROLLBACK TO SAVEPOINT "+multiCommandSavepointName+"; RELEASE SAVEPOINT "+multiCommandSavepointName)
+		session.DB.UnlockRun()
+	}
+
+	for i, cmd := range nonEmpty {
+		last := i == len(nonEmpty)-1
+		if err := p.ForwardCommandToDB(testID, cmd, sendReadyForQuery && last); err != nil {
+			rollbackMulti()
+			return err
+		}
+	}
+
+	session.DB.LockRun()
+	_, relErr := session.DB.execTxLocked(ctx, "RELEASE SAVEPOINT "+multiCommandSavepointName)
+	session.DB.UnlockRun()
+	if relErr != nil {
+		return fmt.Errorf("release multi-command savepoint: %w", relErr)
+	}
+
+	if err := p.backend.Flush(); err != nil {
+		return fmt.Errorf("falha no flush de múltiplos resultados: %w", err)
+	}
+	elapsed := time.Since(start)
+	if session.DB != nil {
+		session.DB.Gui.UpdateLastQueryHistoryDuration(elapsed)
+	}
+	log.Printf("[PROXY] Multi-command batch executed")
+	if sendReadyForQuery {
+		p.SendReadyForQuery()
+	}
+	return nil
+}
+
 // SafeForwardMultipleCommandsToDB lida com strings contendo múltiplos comandos separados por ponto e vírgula.
 // Runs the whole batch inside a savepoint: either all commands succeed (RELEASE SAVEPOINT) or none apply (ROLLBACK TO SAVEPOINT).
 // The real transaction is never aborted; only the savepoint is rolled back on failure.
@@ -281,6 +378,30 @@ func (p *proxyConnection) SafeForwardMultipleCommandsToDB(testID string, command
 		fullQuery += ";"
 	}
 	start := time.Now()
+
+	// Same as sequential ForwardCommandToDB: claim session before user SAVEPOINT (from BEGIN) runs.
+	for _, cmd := range commands {
+		c := strings.TrimSpace(cmd)
+		if c == "" {
+			continue
+		}
+		if IsUserBeginQuery(c) {
+			if err := session.DB.ClaimOpenTransaction(p.connectionID()); err != nil {
+				return err
+			}
+		}
+	}
+
+	// When we run our synthetic ROLLBACK (ROLLBACK TO SAVEPOINT; RELEASE SAVEPOINT), the client
+	// sent a single "ROLLBACK" and expects a single CommandComplete("ROLLBACK") + ReadyForQuery.
+	isRollbackPair := len(commands) == 2 &&
+		strings.Contains(strings.ToUpper(strings.TrimSpace(commands[0])), "ROLLBACK TO SAVEPOINT ") &&
+		strings.Contains(strings.ToUpper(strings.TrimSpace(commands[1])), "RELEASE SAVEPOINT ")
+
+	if multiCommandBatchNeedsSequentialExec(commands) && !isRollbackPair {
+		return p.safeForwardMultipleCommandsSequential(testID, commands, sendReadyForQuery, ctx, session, multiCommandSavepointName, start)
+	}
+
 	session.DB.LockRun()
 	defer session.DB.UnlockRun()
 
@@ -295,12 +416,6 @@ func (p *proxyConnection) SafeForwardMultipleCommandsToDB(testID string, command
 
 	mrr := pgConn.Exec(ctx, fullQuery)
 	defer mrr.Close()
-
-	// When we run our synthetic ROLLBACK (ROLLBACK TO SAVEPOINT; RELEASE SAVEPOINT), the client
-	// sent a single "ROLLBACK" and expects a single CommandComplete("ROLLBACK") + ReadyForQuery.
-	isRollbackPair := len(commands) == 2 &&
-		strings.Contains(strings.ToUpper(strings.TrimSpace(commands[0])), "ROLLBACK TO SAVEPOINT ") &&
-		strings.Contains(strings.ToUpper(strings.TrimSpace(commands[1])), "RELEASE SAVEPOINT ")
 
 	// Track only the last command's result (may be a SELECT with rows, SELECT with no rows, or a non-SELECT).
 	var lastResultRowDesc *pgproto3.RowDescription

@@ -45,7 +45,7 @@ func TestMain(m *testing.M) {
 		code := m.Run()
 		os.Exit(code)
 	}
-	// Use port 0 so the OS assigns a free port (avoids "port already in use" when multiple test runs or integration left 5433 open)
+	// Use port 0 so the OS assigns a free port (avoids "port already in use" when multiple test runs overlap)
 	proxyTestServer = proxy.NewServer(
 		cfg.Postgres.Host,
 		cfg.Postgres.Port,
@@ -126,7 +126,7 @@ func proxyHostPort(cfg *config.Config) (host string, port int) {
 	}
 	port = cfg.Proxy.ListenPort
 	if port <= 0 {
-		port = 5433
+		port = proxy.DefaultListenPort
 	}
 	return host, port
 }
@@ -323,6 +323,9 @@ func buildDSN(host string, port int, database, user, password, applicationName s
 	if applicationName != "" {
 		dsn += " application_name=" + applicationName
 	}
+	// Match integration tests: avoid SSL negotiation (startTLS) on local Postgres; without this,
+	// PingContext can hang past its deadline on some Windows setups while upgrading to TLS.
+	dsn += " sslmode=disable"
 	return dsn
 }
 
@@ -386,7 +389,7 @@ func stopProxyServer(proxyServer *proxy.Server) {
 // Falha o teste se o ping não for bem-sucedido.
 func pingWithTimeout(t *testing.T, db *sql.DB, timeout time.Duration) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout*100000)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()

@@ -278,12 +278,20 @@ func (p *proxyConnection) handleMessageFlush(testID string) {
 
 func (p *proxyConnection) handleMessageSync() {
 	// The real Sync+ReadyForQuery were already consumed by PgConn.Prepare() or ExecPrepared().
-	// We just send a synthetic ReadyForQuery to the client.
+	// Clear any pending extended-query error and send a single ReadyForQuery to the client.
+	// This is the ONLY place ReadyForQuery is sent for the extended-query protocol.
+	p.extendedQueryPendingError = nil
 	p.SendReadyForQuery()
-	//p.backend.Flush()
 }
 
 func (p *proxyConnection) handleMessageDescribe(msg *pgproto3.Describe) {
+	// If a previous message in this extended-query cycle failed, propagate that same error.
+	// Do NOT send ReadyForQuery — only Sync does that.
+	if p.extendedQueryPendingError != nil {
+		p.sendExtendedQueryErr(p.extendedQueryPendingError)
+		return
+	}
+
 	// Use per-connection cached StatementDescription to respond with ParameterDescription + RowDescription/NoData.
 	// Multi-statement "prepared" queries have no backend SD; send empty params + NoData.
 	var stmtName string
@@ -307,24 +315,29 @@ func (p *proxyConnection) handleMessageDescribe(msg *pgproto3.Describe) {
 		resultFormats = p.PortalResultFormats(msg.Name)
 	}
 	if sd == nil {
-		p.SendErrorResponse(fmt.Errorf("statement description not found for Describe (objectType=%c, name=%q)", msg.ObjectType, msg.Name))
+		p.sendExtendedQueryErr(fmt.Errorf("statement description not found for Describe (objectType=%c, name=%q)", msg.ObjectType, msg.Name))
 		return
 	}
 	p.sendDescribeFromSD(sd, msg.ObjectType, resultFormats)
 }
 
 func (p *proxyConnection) handleMessageExecute(testID string, msg *pgproto3.Execute) {
+	// If a previous message in this extended-query cycle failed, propagate the error (no RFQ).
+	if p.extendedQueryPendingError != nil {
+		p.sendExtendedQueryErr(p.extendedQueryPendingError)
+		return
+	}
 	// Execute the prepared statement via PgConn.ExecPrepared() using per-connection
 	// portal/statement state and backend-prefixed statement name. LockRun serializes backend use.
 	session := p.server.PgRollback.GetSession(testID)
 	if session == nil || session.DB == nil || session.DB.PgConn() == nil {
-		p.SendErrorResponse(fmt.Errorf("sessão não encontrada para testID: %s", testID))
+		p.sendExtendedQueryErr(fmt.Errorf("sessão não encontrada para testID: %s", testID))
 		return
 	}
 	stmtName := p.PortalStatementName(msg.Portal)
 	query, params, formatCodes, ok := p.QueryForPortal(msg.Portal)
 	if !ok {
-		p.SendErrorResponse(fmt.Errorf("portal ou statement não encontrado para execução (portal=%q)", msg.Portal))
+		p.sendExtendedQueryErr(fmt.Errorf("portal ou statement não encontrado para execução (portal=%q)", msg.Portal))
 		return
 	}
 	if query != "" && session.DB != nil {
@@ -353,7 +366,7 @@ func (p *proxyConnection) handleMessageExecute(testID string, msg *pgproto3.Exec
 		}
 		if err := p.SafeForwardMultipleCommandsToDB(testID, commands, false); err != nil {
 			log.Printf("[PROXY] multi-statement Execute failed: %v", err)
-			p.SendErrorResponse(err)
+			p.sendExtendedQueryErr(err)
 			recoverSessionTxAfterDirectExec(session)
 		}
 		return
@@ -371,12 +384,17 @@ func (p *proxyConnection) handleMessageExecute(testID string, msg *pgproto3.Exec
 	}
 	if err != nil {
 		log.Printf("[PROXY] ExecPrepared failed: %v", err)
-		p.SendErrorResponse(err)
+		p.sendExtendedQueryErr(err)
 		recoverSessionTxAfterDirectExec(session)
 	}
 }
 
 func (p *proxyConnection) handleMessageBind(msg *pgproto3.Bind) {
+	// If a previous message in this extended-query cycle failed, propagate the error (no RFQ).
+	if p.extendedQueryPendingError != nil {
+		p.sendExtendedQueryErr(p.extendedQueryPendingError)
+		return
+	}
 	// Store portal mapping per-connection. The actual Bind to PostgreSQL happens when
 	// Execute arrives (via ExecPrepared which uses backend-prefixed statement name).
 	p.BindPortal(msg.DestinationPortal, msg.PreparedStatement, msg.Parameters, msg.ParameterFormatCodes, msg.ResultFormatCodes)
@@ -388,14 +406,21 @@ func (p *proxyConnection) handleMessageParse(testID string, msg *pgproto3.Parse)
 	// Extended Query: intercept query, store per-connection, call PgConn.Prepare() with
 	// connection-prefixed name so concurrent connections don't collide. LockRun serializes
 	// use of the shared backend. Do NOT call any session.DB method that takes d.mu while holding LockRun.
+	//
+	// If a previous message in this extended-query cycle already failed, short-circuit with
+	// the same error (no RFQ — only Sync sends ReadyForQuery).
+	if p.extendedQueryPendingError != nil {
+		p.sendExtendedQueryErr(p.extendedQueryPendingError)
+		return
+	}
 	session := p.server.PgRollback.GetSession(testID)
 	if session == nil || session.DB == nil || session.DB.PgConn() == nil {
-		p.SendErrorResponse(fmt.Errorf("sessão não encontrada para testID: %s", testID))
+		p.sendExtendedQueryErr(fmt.Errorf("sessão não encontrada para testID: %s", testID))
 		return
 	}
 	interceptedQuery, err := p.server.PgRollback.InterceptQuery(testID, msg.Query, p.connectionID())
 	if err != nil {
-		p.SendErrorResponse(err)
+		p.sendExtendedQueryErr(err)
 		return
 	}
 	p.SetPreparedStatement(msg.Name, interceptedQuery)
@@ -420,20 +445,27 @@ func (p *proxyConnection) handleMessageParse(testID string, msg *pgproto3.Parse)
 		existingSD = p.GetStatementDescriptionLocked(msg.Name)
 	}
 	pgConn := session.DB.PgConnLocked()
-	var sd *pgconn.StatementDescription
-	var prepErr error
 	ctx := session.Context()
 	if msg.Name != "" && existingSD != nil && pgConn != nil {
 		_ = pgConn.Deallocate(ctx, backendName)
 	}
-	if pgConn != nil {
-		sd, prepErr = pgConn.Prepare(ctx, backendName, interceptedQuery, msg.ParameterOIDs)
-	} else {
-		prepErr = fmt.Errorf("conexão backend indisponível")
+	if pgConn == nil {
+		p.sendExtendedQueryErr(fmt.Errorf("conexão backend indisponível"))
+		return
 	}
+
+	// Wrap pgConn.Prepare in a savepoint guard: a failed parse (e.g. table/column does not exist)
+	// would otherwise leave the base transaction in aborted state (SQLSTATE 25P02).
+	// runWithSavepointGuardLocked is safe here because LockRun() holds d.mu.
+	var sd *pgconn.StatementDescription
+	prepErr := session.DB.runWithSavepointGuardLocked(ctx, "pgrollback_prepare_guard", func() error {
+		var err error
+		sd, err = pgConn.Prepare(ctx, backendName, interceptedQuery, msg.ParameterOIDs)
+		return err
+	})
 	if prepErr != nil {
 		log.Printf("[PROXY] Prepare failed: %v", prepErr)
-		p.SendErrorResponse(prepErr)
+		p.sendExtendedQueryErr(prepErr)
 		return
 	}
 	p.SetStatementDescriptionLocked(msg.Name, sd)

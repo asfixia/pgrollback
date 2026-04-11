@@ -153,3 +153,17 @@ func (p *proxyConnection) SendErrorResponse(err error) {
 	})
 	p.SendReadyForQuery()
 }
+
+// sendExtendedQueryErr sends an ErrorResponse for an extended-query pipeline message (Parse,
+// Describe, Bind, Execute) WITHOUT ReadyForQuery. ReadyForQuery is sent only on Sync.
+// It also caches the error so subsequent messages in the same pipeline cycle (before Sync)
+// are short-circuited with the original error, preventing confusing secondary errors.
+func (p *proxyConnection) sendExtendedQueryErr(err error) {
+	p.extendedQueryPendingError = err
+	p.backend.Send(&pgproto3.ErrorResponse{
+		Severity: "ERROR",
+		Message:  err.Error(),
+		Code:     "XX000",
+	})
+	p.backend.Flush()
+}

@@ -62,6 +62,12 @@ type proxyConnection struct {
 	portalFormatCodes        map[string][]int16
 	portalResultFormats      map[string][]int16
 	multiStatementStatements map[string]struct{} // statement names that are multi-statement (not prepared on backend)
+
+	// extendedQueryPendingError holds an error from a failed extended-query message (Parse, Describe,
+	// Bind, Execute). Per the PostgreSQL wire protocol, ReadyForQuery is only sent in response to
+	// Sync, NOT after each individual extended-query error. While this is non-nil, subsequent
+	// messages in the same pipeline cycle echo the cached error (no RFQ) until Sync clears it.
+	extendedQueryPendingError error
 }
 
 // startProxy inicia o proxy usando a sessão existente
