@@ -30,13 +30,52 @@ const htmlTemplate = `<!DOCTYPE html>
     .page { width: 100%; max-width: 100%; margin: 0; padding: 1.25rem 1.5rem; }
     .header {
       display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 0.75rem;
+      margin-bottom: 1.5rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid rgba(51, 65, 85, 0.6);
+    }
+    .header-row {
+      display: flex;
       align-items: center;
       justify-content: space-between;
       flex-wrap: wrap;
       gap: 1rem;
-      margin-bottom: 1.5rem;
-      padding-bottom: 1rem;
-      border-bottom: 1px solid rgba(51, 65, 85, 0.6);
+    }
+    .backend-conn {
+      margin: 0;
+      padding: 0.65rem 0.85rem;
+      background: rgba(15, 23, 42, 0.75);
+      border: 1px solid rgba(51, 65, 85, 0.7);
+      border-radius: 8px;
+      font-size: 0.8125rem;
+      color: #94a3b8;
+      line-height: 1.45;
+      cursor: default;
+    }
+    .backend-conn-label {
+      font-weight: 600;
+      color: #cbd5e1;
+      margin-right: 0.5rem;
+      white-space: nowrap;
+    }
+    .backend-conn code.backend-conn-str {
+      font-family: 'Consolas', 'Monaco', ui-monospace, monospace;
+      font-size: 0.78rem;
+      color: #7dd3fc;
+      word-break: break-all;
+      background: transparent;
+      border: 0;
+      padding: 0;
+    }
+    .proxy-conn code.backend-conn-str { color: #86efac; }
+    .proxy-conn-hint {
+      margin-top: 0.45rem;
+      font-size: 0.72rem;
+      color: #64748b;
+      line-height: 1.4;
     }
     .header h1 {
       margin: 0;
@@ -284,12 +323,21 @@ const htmlTemplate = `<!DOCTYPE html>
 <body>
   <div class="page">
     <header class="header">
-      <h1><span>PgRollback</span> Sessions</h1>
-      <div class="toolbar">
-        <button type="button" id="refresh">Refresh</button>
-        <button type="button" id="rollbackAllBtn" class="rollback-all-btn">Rollback All</button>
-        <button type="button" id="disconnectAllBtn" class="disconnect-all-btn">Disconnect All</button>
-        <button type="button" class="settings-btn" id="settingsBtn">Settings</button>
+      <div class="header-row">
+        <h1><span>PgRollback</span> Sessions</h1>
+        <div class="toolbar">
+          <button type="button" id="refresh">Refresh</button>
+          <button type="button" id="rollbackAllBtn" class="rollback-all-btn">Rollback All</button>
+          <button type="button" id="disconnectAllBtn" class="disconnect-all-btn">Disconnect All</button>
+          <button type="button" class="settings-btn" id="settingsBtn">Settings</button>
+        </div>
+      </div>
+      <div class="backend-conn proxy-conn" id="proxy_conn_wrap" title="">
+        <span class="backend-conn-label">Proxy listen</span><code class="backend-conn-str" id="proxy_conn_line"></code>
+        <div class="proxy-conn-hint">Connect your client to this host and port using the same <strong>database name</strong>, <strong>user</strong>, and <strong>password</strong> as backend PostgreSQL. The proxy does not use a separate password.</div>
+      </div>
+      <div class="backend-conn" id="backend_conn_wrap" title="">
+        <span class="backend-conn-label">Backend PostgreSQL</span><code class="backend-conn-str" id="backend_conn_masked"></code>
       </div>
     </header>
     <div class="table-wrap">
@@ -346,6 +394,39 @@ const htmlTemplate = `<!DOCTYPE html>
   <script>
     const tbody = document.getElementById('tbody');
     const refreshBtn = document.getElementById('refresh');
+    // Must match config.PasswordMask in Go (fixed sentinel for "keep existing password" on save).
+    const PASSWORD_MASK = '******';
+    function applyConfigMeta(data) {
+      var c = data && data.config;
+      var px = c && c.proxy ? c.proxy : {};
+      var pHost = (px.listen_host != null && String(px.listen_host).trim() !== '') ? String(px.listen_host).trim() : '';
+      var pPort = (px.listen_port != null && px.listen_port !== '') ? String(px.listen_port) : '';
+      var proxyLine = '';
+      if (pHost || pPort) {
+        proxyLine = 'host=' + (pHost || '?') + ' port=' + (pPort || '?');
+      }
+      var proxyEl = document.getElementById('proxy_conn_line');
+      var proxyWrap = document.getElementById('proxy_conn_wrap');
+      if (proxyEl) proxyEl.textContent = proxyLine;
+      if (proxyWrap) {
+        proxyWrap.setAttribute('title', proxyLine
+          ? ('Proxy address: ' + proxyLine + '. Use backend DB user, password, and database; no separate proxy password.')
+          : 'Proxy listen host and port (set in Settings)');
+      }
+      var wrap = document.getElementById('backend_conn_wrap');
+      var el = document.getElementById('backend_conn_masked');
+      var s = (data && data.postgres_connection_string_masked) ? data.postgres_connection_string_masked : '';
+      if (el) el.textContent = s;
+      if (wrap) {
+        wrap.setAttribute('title', s ? ('Real database (password hidden): ' + s) : 'Real database connection string');
+      }
+    }
+    function refreshBackendConnLine() {
+      fetch('__API_BASE__/config').then(function(r) { return r.json(); }).then(function(data) {
+        if (data && data.error) return;
+        applyConfigMeta(data || {});
+      }).catch(function() {});
+    }
     var settingsModal = document.getElementById('settingsModal');
     var settingsBtn = document.getElementById('settingsBtn');
     var settingsForm = document.getElementById('settingsForm');
@@ -584,6 +665,7 @@ const htmlTemplate = `<!DOCTYPE html>
           .catch(function(e) { alert('Disconnect All failed: ' + (e && e.message ? e.message : e)); });
       });
     }
+    refreshBackendConnLine();
     load();
     setInterval(load, 1000);
 
@@ -592,6 +674,7 @@ const htmlTemplate = `<!DOCTYPE html>
         settingsModal.classList.add('visible');
         fetch('__API_BASE__/config').then(function(r) { return r.json(); }).then(function(data) {
           if (data.error) { alert(data.error); return; }
+          applyConfigMeta(data);
           var c = data.config || {};
           var p = c.postgres || {};
           var px = c.proxy || {};
@@ -603,7 +686,7 @@ const htmlTemplate = `<!DOCTYPE html>
           document.getElementById('cfg_postgres_database').value = p.database || '';
           document.getElementById('cfg_postgres_user').value = p.user || '';
           document.getElementById('cfg_postgres_password').value = '';
-          document.getElementById('cfg_postgres_password').placeholder = (p.password && p.password !== '') ? '****' : 'Leave blank to keep current';
+          document.getElementById('cfg_postgres_password').placeholder = (p.password && p.password !== '') ? PASSWORD_MASK : 'Leave blank to keep current';
           document.getElementById('cfg_postgres_session_timeout').value = (p.session_timeout || '').toString();
           document.getElementById('cfg_proxy_listen_host').value = px.listen_host || '';
           document.getElementById('cfg_proxy_listen_port').value = px.listen_port || '';
@@ -642,7 +725,7 @@ const htmlTemplate = `<!DOCTYPE html>
           port: parseInt(document.getElementById('cfg_postgres_port').value, 10) || 0,
           database: document.getElementById('cfg_postgres_database').value,
           user: document.getElementById('cfg_postgres_user').value,
-          password: (pw === '') ? '****' : pw,
+          password: (pw === '') ? PASSWORD_MASK : pw,
           session_timeout: document.getElementById('cfg_postgres_session_timeout').value
         };
         var px = {
@@ -667,7 +750,7 @@ const htmlTemplate = `<!DOCTYPE html>
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         }).then(function(r) {
-          if (r.ok) { closeSettingsModal(); }
+          if (r.ok) { closeSettingsModal(); refreshBackendConnLine(); }
           else { r.text().then(function(t) { alert(t); }); }
         }).catch(function(e) { alert('Save failed: ' + e.message); });
       });

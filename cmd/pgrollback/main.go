@@ -60,7 +60,7 @@ func main() {
 	log.Printf("GUI: %s", guiURL)
 
 	// System tray icon blocks the main goroutine until the user clicks Quit.
-	tray.Run(guiURL, func() {
+	tray.Run(guiURL, config.PostgresConnStringMasked(&cfg.Postgres), func() {
 		log.Println("Shutting down server...")
 		if err := server.Stop(); err != nil {
 			log.Printf("Error stopping server: %v", err)

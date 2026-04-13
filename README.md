@@ -43,7 +43,7 @@ pgrollback keeps **one real PostgreSQL transaction** on the server side and expo
 - Connection pools and multiple connections per test ID.
 - Automatic rollback when the session ends; no extra cleanup scripts.
 - Real PostgreSQL execution (not mocked SQL).
-- Optional web GUI for queries on the same listen port.
+- Web GUI to view the running queries and query history.
 
 ---
 
@@ -68,10 +68,44 @@ When the test finishes (or you issue a full rollback command), the sandbox is di
 
 ## Quick start
 
-1. **Install Go** (1.23+) and, on Windows for this repo, a **64-bit MinGW** toolchain for CGO (see [Build](#build)).
-2. **Config** — Copy `config/pgrollback.yaml` and set `postgres.*` and `proxy.listen_*` for your machine.
-3. **Run the proxy** — `make run` or `./bin/pgrollback --config config/pgrollback.yaml` (Windows: `build.bat` / `run.bat` after `setEnvironments.bat`).
-4. **Point tests at the proxy** — Use the proxy host/port as the DB endpoint and set `application_name` to `pgrollback_<testID>` so sessions are isolated (see below).
+This is how you **use** pgrollback: run the proxy, aim your app at it, and keep each test run in its own sandbox.
+
+### From a release (binary)
+
+1. **Download** the pgrollback for your platform from **[pgrollback releases](https://github.com/asfixia/pgrollback/releases/)**, plus the **sample config** (or use [`config/pgrollback.yaml`](config/pgrollback.yaml) from this repository).
+
+2. **Point the proxy at your database** — In the YAML, set the `postgres` block to the credentials of the PostgreSQL instance you use for **testing** (the real server the proxy will open the long-lived transaction on):
+
+   ```yaml
+   postgres:
+     host: localhost
+     port: 5432
+     database: postgres
+     user: postgres
+     password: postgres
+   ```
+
+   Replace `host`, `port`, `database`, `user`, and `password` with your testing database. Your application does **not** connect here; only the proxy does.
+
+3. **Change where the proxy listens** — Under `proxy`, keep or adjust `listen_host` and `listen_port`. For example:
+
+   ```yaml
+   proxy:
+     listen_host: localhost
+     listen_port: 5433
+   ```
+
+   Your app and tests will use **this** host and port as the “database” address.
+
+4. **Start pgrollback** — Run the binary with your config, e.g. `./bin/pgrollback --config /path/to/pgrollback.yaml`.
+
+5. **Configure your connection through the proxy** — Configure your PostgreSQL client to use `listen_host` and `listen_port` (e.g. `localhost` and `5433`). Traffic goes: **app → pgrollback → Postgres**. Work for that sandbox runs inside **one** server-side transaction; when the sandbox ends, it **rolls back**—no durable commits from that path.
+
+6. **Separate sandboxes with `application_name`** — Set `application_name` to a stable value per logical test or worker, e.g. `pgrollback_<testId>`. The proxy treats each **distinct** `application_name` as a **different** sandbox (a **different** base transaction). Connections that share the same `application_name` share one sandbox; different names are isolated from each other. See [Connect from tests](#connect-from-tests).
+
+### Building from source
+
+To compile locally (Go, and on Windows MinGW for CGO), see [Build](#build). Then run the proxy the same way as in step 4, pointing `--config` at your edited YAML.
 
 ---
 
@@ -126,11 +160,19 @@ Example: `db.Exec("pgrollback rollback")` in Go, or the equivalent in your stack
 
 **Windows:** install a **64-bit MinGW** GCC (e.g. MSYS2: `pacman -S mingw-w64-x86_64-gcc`), then run **`setEnvironments.bat`** so `PATH`, `CC`, `CXX`, and `CGO_ENABLED=1` are set. See `.vscode/settings.json` for terminal integration.
 
+**Single-file Windows executable (default):** On Windows, **`build.bat`**, **`make build`**, **`make test`**, and **`test.bat`** all use **`CGO_LDFLAGS=-static`** so MinGW links the pthread/GCC runtime into the binary. The resulting `pgrollback.exe` typically only depends on system DLLs (`KERNEL32.dll`, `msvcrt.dll`)—no `libwinpthread-1.dll` next to the exe. Test binaries under `%TEMP%` also avoid needing MinGW on `PATH` at run time.
+
+**Dynamic MinGW link (one flag):** **`build.bat dynamic`** or **`make build DYNAMIC=1`** (and **`make test DYNAMIC=1`** if you use Make for tests) skip `-static` for faster links; then keep MinGW’s `bin` on `PATH` at run time, or copy `libwinpthread-1.dll` / `libgcc_s_seh-1.dll` next to the exe (`build.bat dynamic` copies them into `bin\`). A plain **`go build`** outside these scripts does not set `-static`; pass **`CGO_LDFLAGS=-static`** yourself if you want a single-file exe.
+
 ```bash
 go build -o bin/pgrollback ./cmd/pgrollback
-# or
+# or (Windows: static CGO by default)
 make build
+# or (Windows: dynamic CGO, faster link)
+make build DYNAMIC=1
 ```
+
+**CI:** On tag pushes, [`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds Windows artifacts with **`CGO_LDFLAGS=-static`** (native `windows-latest` job and the Linux cross-compile job), consistent with the default local Windows build.
 
 Without a proper 64-bit `gcc`, you may see errors like `sorry, unimplemented: 64-bit mode not compiled in`.
 

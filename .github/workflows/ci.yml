@@ -100,7 +100,10 @@ jobs:
           go-version: '1.23'
           cache: true
 
+      # Match Makefile / build.bat: static MinGW runtime (no libwinpthread-1.dll beside exe)
       - name: Build pgrollback
+        env:
+          CGO_LDFLAGS: "-static"
         run: go build -o bin/pgrollback.exe ./cmd/pgrollback
 
       - name: Upload binary artifact
@@ -135,6 +138,7 @@ jobs:
           GOOS: windows
           GOARCH: amd64
           CC: x86_64-w64-mingw32-gcc
+          CGO_LDFLAGS: "-static"
         run: |
           mkdir -p bin
           go build -o bin/pgrollback.exe ./cmd/pgrollback

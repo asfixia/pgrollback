@@ -270,8 +270,18 @@ func validateConfig(config *Config) error {
 	return nil
 }
 
-// PasswordMask is the value returned for password in config API responses.
-const PasswordMask = "****"
+// PasswordMask is the value returned for password in config API responses and in masked connection strings.
+const PasswordMask = "******"
+
+// PostgresConnStringMasked returns a libpq-style keyword connection string for the real database
+// with the password replaced by PasswordMask (literal asterisks, not percent-encoded).
+func PostgresConnStringMasked(p *PostgresConfig) string {
+	if p == nil {
+		return ""
+	}
+	return fmt.Sprintf("host=\"%s\" port=\"%d\" dbname=\"%s\" user=\"%s\" password=\"%s\"",
+		p.Host, p.Port, p.Database, p.User, PasswordMask)
+}
 
 // ConfigForAPI returns a copy of the config with password masked as PasswordMask for API/UI display.
 func ConfigForAPI(c *Config) *Config {
@@ -286,7 +296,7 @@ func ConfigForAPI(c *Config) *Config {
 	return &out
 }
 
-// UpdateAndSave merges updated into the current config (keeping existing password if updated sends "" or "****"),
+// UpdateAndSave merges updated into the current config (keeping existing password if updated sends "" or PasswordMask),
 // validates, writes to the config file, and updates in-memory config. Returns error if path is empty or write fails.
 func UpdateAndSave(updated *Config) error {
 	if updated == nil {
@@ -301,7 +311,7 @@ func UpdateAndSave(updated *Config) error {
 		return fmt.Errorf("config not initialized")
 	}
 	merged := *updated
-	if updated.Postgres.Password == "" || updated.Postgres.Password == PasswordMask {
+	if updated.Postgres.Password == "" || updated.Postgres.Password == PasswordMask || updated.Postgres.Password == "****" {
 		merged.Postgres.Password = current.Postgres.Password
 	}
 	if err := validateConfig(&merged); err != nil {

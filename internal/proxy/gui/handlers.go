@@ -8,10 +8,12 @@ import (
 	"pgrollback/internal/config"
 )
 
-// ConfigResponse is the config returned by GET /api/config (includes masked password and config_path).
+// ConfigResponse is the config returned by GET /api/config.
+// PostgresConnectionStringMasked is always derived from the same in-memory postgres settings as the proxy (via config.PostgresConnStringMasked), not stored separately.
 type ConfigResponse struct {
-	ConfigPath string         `json:"config_path"`
-	Config     *config.Config `json:"config"`
+	ConfigPath                     string         `json:"config_path"`
+	Config                         *config.Config `json:"config"`
+	PostgresConnectionStringMasked string         `json:"postgres_connection_string_masked"`
 }
 
 func handleAPISessions(provider SessionProvider) http.HandlerFunc {
@@ -143,8 +145,9 @@ func handleAPIConfigGet(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(ConfigResponse{
 		// Use EffectiveConfigPath so the UI always sees the path it will
 		// use when saving (even if the file didn't exist at startup).
-		ConfigPath: config.EffectiveConfigPath(),
-		Config:     config.ConfigForAPI(cfg),
+		ConfigPath:                     config.EffectiveConfigPath(),
+		Config:                         config.ConfigForAPI(cfg),
+		PostgresConnectionStringMasked: config.PostgresConnStringMasked(&cfg.Postgres),
 	})
 }
 
