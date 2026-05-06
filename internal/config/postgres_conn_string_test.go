@@ -11,7 +11,7 @@ func TestPostgresConnStringMasked(t *testing.T) {
 		Password: "real-secret",
 	}
 	got := PostgresConnStringMasked(p)
-	want := "host=db.example.com port=5432 dbname=appdb user=appuser password=" + PasswordMask
+	want := "host=\"db.example.com\" port=\"5432\" dbname=\"appdb\" user=\"appuser\" password=\"" + PasswordMask + "\""
 	if got != want {
 		t.Fatalf("PostgresConnStringMasked() = %q, want %q", got, want)
 	}
@@ -26,7 +26,7 @@ func TestPostgresConnStringMasked_IPv6Host(t *testing.T) {
 		Password: "x",
 	}
 	got := PostgresConnStringMasked(p)
-	want := "host=::1 port=5432 dbname=postgres user=u password=" + PasswordMask
+	want := "host=\"::1\" port=\"5432\" dbname=\"postgres\" user=\"u\" password=\"" + PasswordMask + "\""
 	if got != want {
 		t.Fatalf("PostgresConnStringMasked() = %q, want %q", got, want)
 	}
