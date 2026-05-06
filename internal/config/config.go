@@ -203,6 +203,8 @@ func EffectiveConfigPath() string {
 	return testutil.ConfigPath()
 }
 
+// loadFromEnv overwrites config fields when the corresponding env var is non-empty.
+// Precedence: defaults → YAML file → environment (last wins).
 func loadFromEnv(config *Config) {
 	// Mapeamento de variáveis de ambiente para campos de configuração
 	envMappings := []struct {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,80 @@ type TestSession struct {
 	ctx                 context.Context
 	cancel              context.CancelFunc
 	mu                  sync.RWMutex
+
+	// teardown groups all session-destruction synchronization and connection tracking.
+	teardown sessionTeardownState
+}
+
+// sessionTeardownState centralizes per-session teardown coordination.
+// It keeps active proxy clients and synchronization to safely:
+//  1. block new clients while destroying,
+//  2. close all current clients,
+//  3. wait for their cleanup loops to finish.
+type sessionTeardownState struct {
+	clientConns map[net.Conn]struct{}
+	clientsWG   sync.WaitGroup
+	destroying  bool
+	destroyWait chan struct{} // closed when destroying finishes; GetOrCreateSession waits on it
+}
+
+// registerClientLocked tracks a proxy TCP client unless destroy is in progress.
+// Caller must hold session.mu.
+func (t *sessionTeardownState) registerClientLocked(c net.Conn) bool {
+	if t.destroying {
+		return false
+	}
+	t.clientsWG.Add(1)
+	if t.clientConns == nil {
+		t.clientConns = make(map[net.Conn]struct{})
+	}
+	t.clientConns[c] = struct{}{}
+	return true
+}
+
+// unregisterClientLocked removes a client from tracking and releases one wait-group slot.
+// Caller must hold session.mu.
+func (t *sessionTeardownState) unregisterClientLocked(c net.Conn) {
+	delete(t.clientConns, c)
+	t.clientsWG.Done()
+}
+
+// destroyWaitChanLocked returns the current destroy wait channel (or nil).
+// Caller must hold session.mu.
+func (t *sessionTeardownState) destroyWaitChanLocked() chan struct{} {
+	if !t.destroying {
+		return nil
+	}
+	return t.destroyWait
+}
+
+// beginDestroyLocked marks destroy in progress, ensures wait channel exists,
+// and returns a snapshot of currently tracked clients to close.
+// Caller must hold session.mu.
+func (t *sessionTeardownState) beginDestroyLocked() []net.Conn {
+	if t.destroyWait == nil {
+		t.destroyWait = make(chan struct{})
+	}
+	t.destroying = true
+	conns := make([]net.Conn, 0, len(t.clientConns))
+	for c := range t.clientConns {
+		conns = append(conns, c)
+	}
+	return conns
+}
+
+// waitClients blocks until all tracked clients have unregistered.
+func (t *sessionTeardownState) waitClients() {
+	t.clientsWG.Wait()
+}
+
+// finishDestroyLocked clears destroy state and returns the wait channel to close.
+// Caller must hold session.mu.
+func (t *sessionTeardownState) finishDestroyLocked() chan struct{} {
+	t.destroying = false
+	ch := t.destroyWait
+	t.destroyWait = nil
+	return ch
 }
 
 type PgRollback struct {
@@ -140,6 +215,21 @@ func (s *TestSession) CancelLocked() {
 	}
 }
 
+// registerProxyClient records this TCP client for teardown ordering. Returns false while the session
+// is being destroyed so new proxy clients are rejected.
+func (s *TestSession) registerProxyClient(c net.Conn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.teardown.registerClientLocked(c)
+}
+
+// unregisterProxyClient removes a client from the session; must pair with a successful registerProxyClient.
+func (s *TestSession) unregisterProxyClient(c net.Conn) {
+	s.mu.Lock()
+	s.teardown.unregisterClientLocked(c)
+	s.mu.Unlock()
+}
+
 func NewPgRollback(postgresHost string, postgresPort int, postgresDB, postgresUser, postgresPass string, timeout time.Duration, sessionTimeout time.Duration, keepaliveInterval time.Duration) *PgRollback {
 	return &PgRollback{
 		SessionsByTestID:  make(map[string]*TestSession),
@@ -168,37 +258,77 @@ func NewPgRollback(postgresHost string, postgresPort int, postgresDB, postgresUs
 // IMPORTANTE: O mesmo testID sempre usa a mesma conexão porque há apenas uma sessão por testID,
 // e a sessão guarda sua DB (connection + transaction). Tudo fica sob TestSession, indexado por testID.
 func (p *PgRollback) GetOrCreateSession(testID string) (*TestSession, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	if testID == "" {
 		return nil, fmt.Errorf("testID is required")
 	}
-	if session := p.getUsableExistingSessionLocked(testID); session != nil {
-		return session, nil
+	for {
+		p.mu.Lock()
+		session := p.SessionsByTestID[testID]
+		waitCh := p.waitForDestroyIfInProgress(session)
+		if waitCh != nil {
+			p.mu.Unlock()
+			<-waitCh
+			continue
+		}
+		if session != nil {
+			session.mu.Lock()
+			reusable := p.tryReuseSessionLocked(testID, session)
+			session.mu.Unlock()
+			if reusable != nil {
+				p.mu.Unlock()
+				return reusable, nil
+			}
+			// Session existed but is not reusable (closed/broken); retry create path in this loop.
+			p.mu.Unlock()
+			continue
+		}
+		newSession, err := p.createAndStoreSessionLocked(testID)
+		p.mu.Unlock()
+		if err != nil {
+			return nil, err
+		}
+		return newSession, nil
 	}
+}
+
+// waitForDestroyIfInProgress returns a channel to wait on when session teardown is in progress.
+// Caller must hold p.mu.
+func (p *PgRollback) waitForDestroyIfInProgress(session *TestSession) chan struct{} {
+	if session == nil {
+		return nil
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return p.waitForDestroyIfInProgressLocked(session)
+}
+
+// waitForDestroyIfInProgressLocked checks destroy state without taking session locks.
+// Caller must hold p.mu and session.mu.
+func (p *PgRollback) waitForDestroyIfInProgressLocked(session *TestSession) chan struct{} {
+	return session.teardown.destroyWaitChanLocked()
+}
+
+// tryReuseSessionLocked updates activity and returns session when it is usable.
+// If unusable, removes it from map and returns nil.
+// Caller must hold both p.mu and session.mu.
+func (p *PgRollback) tryReuseSessionLocked(testID string, session *TestSession) *TestSession {
+	session.LastActivity = time.Now()
+	if session.DB != nil && session.DB.PgConnLocked() != nil && !session.DB.PgConnLocked().IsClosed() {
+		return session
+	}
+	delete(p.SessionsByTestID, testID)
+	return nil
+}
+
+// createAndStoreSessionLocked creates a new session and stores it in map.
+// Caller must hold p.mu.
+func (p *PgRollback) createAndStoreSessionLocked(testID string) (*TestSession, error) {
 	newSession, err := p.createNewSessionLocked(testID)
 	if err != nil {
 		return nil, err
 	}
 	p.SessionsByTestID[testID] = newSession
 	return newSession, nil
-}
-
-// getUsableExistingSessionLocked returns an existing session if it is usable; otherwise it removes it from the map.
-// Caller must hold p.mu (write lock) because it may delete from SessionsByTestID.
-func (p *PgRollback) getUsableExistingSessionLocked(testID string) *TestSession {
-	// Fast path: reuse existing session (brief lock).
-	if session, exists := p.SessionsByTestID[testID]; exists {
-		session.mu.Lock()
-		session.LastActivity = time.Now()
-		session.mu.Unlock()
-
-		if session.DB != nil && session.DB.PgConnLocked() != nil && !session.DB.PgConnLocked().IsClosed() {
-			return session
-		}
-		delete(p.SessionsByTestID, testID)
-	}
-	return nil
 }
 
 func (p *PgRollback) GetSession(testID string) *TestSession {
@@ -315,29 +445,155 @@ func isConnClosedOrFatal(err error) bool {
 // do estado e retorna nil para o cliente ter sucesso (a tarefa "encerrar sessão" foi cumprida).
 func (p *PgRollback) DestroySession(testID string) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	session, exists := p.SessionsByTestID[testID]
+	p.mu.Unlock()
 	if !exists {
 		return fmt.Errorf("session not found for test_id: %s", testID)
 	}
-	session.mu.Lock()
-	defer session.mu.Unlock()
-	return p.DestroySessionLocked(testID, session)
+	return p.destroySessionCore(session, testID)
 }
 
-func (p *PgRollback) DestroySessionLocked(testID string, session *TestSession) error {
-	if session == nil || session.DB == nil {
+// destroySessionIgnoreNotFound tears down a session if it is still in the map (used by idle cleanup).
+func (p *PgRollback) destroySessionIgnoreNotFound(testID string) error {
+	p.mu.Lock()
+	session, ok := p.SessionsByTestID[testID]
+	p.mu.Unlock()
+	if !ok {
 		return nil
 	}
+	return p.destroySessionCore(session, testID)
+}
+
+// destroySessionCore closes all proxy TCP clients for the session, waits until their message loops
+// (including disconnect cleanup) finish, then closes the shared backend and removes the session.
+// Caller must not hold p.mu or session.mu. Safe to call concurrently for the same session; only one
+// teardown succeeds.
+func (p *PgRollback) destroySessionCore(session *TestSession, testID string) error {
+	p.mu.Lock()
+	if !p.beginDestroySessionMapGateLocked(session, testID) {
+		p.mu.Unlock()
+		return nil
+	}
+	session.mu.Lock()
+	conns, done := p.beginDestroySessionBodyLocked(session, testID)
+	session.mu.Unlock()
+	p.mu.Unlock()
+
+	if done {
+		return nil
+	}
+
+	for _, c := range conns {
+		_ = c.Close()
+	}
+
+	session.teardown.waitClients()
+
+	p.mu.Lock()
+	curSession := p.SessionsByTestID[testID]
+	session.mu.Lock()
+	destroyWaitCh, err := p.finishDestroySessionLocked(session, curSession, testID)
+	session.mu.Unlock()
+	p.mu.Unlock()
+
+	if destroyWaitCh != nil {
+		close(destroyWaitCh)
+	}
+	return err
+}
+
+// destroySessionCoreWithPLock performs destroy while caller currently holds p.mu.
+// It temporarily releases p.mu around blocking I/O/wait phases, then re-acquires it.
+func (p *PgRollback) destroySessionCoreWithPLock(session *TestSession, testID string) error {
+	if !p.beginDestroySessionMapGateLocked(session, testID) {
+		return nil
+	}
+	session.mu.Lock()
+	conns, done := p.beginDestroySessionBodyLocked(session, testID)
+	session.mu.Unlock()
+	if done {
+		return nil
+	}
+
+	p.mu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
+	session.teardown.waitClients()
+	p.mu.Lock()
+
+	curSession := p.SessionsByTestID[testID]
+	session.mu.Lock()
+	destroyWaitCh, err := p.finishDestroySessionLocked(session, curSession, testID)
+	session.mu.Unlock()
+	if destroyWaitCh != nil {
+		close(destroyWaitCh)
+	}
+	return err
+}
+
+// beginDestroySessionMapGateLocked reports whether session is still the map entry for testID.
+// Caller must hold p.mu. Does not lock or unlock any mutex.
+func (p *PgRollback) beginDestroySessionMapGateLocked(session *TestSession, testID string) bool {
+	curSession, ok := p.SessionsByTestID[testID]
+	return ok && curSession == session
+}
+
+// beginDestroySessionBodyLocked starts teardown for session (snapshot conns, cancel ctx).
+// Returns (connections to close, done=true) when no further work is needed (e.g. DB already nil).
+// Caller must hold p.mu and session.mu. Does not lock or unlock any mutex.
+func (p *PgRollback) beginDestroySessionBodyLocked(session *TestSession, testID string) ([]net.Conn, bool) {
+	if session.DB == nil {
+		delete(p.SessionsByTestID, testID)
+		return nil, true
+	}
+
+	conns := session.teardown.beginDestroyLocked()
+	session.CancelLocked()
+	return conns, false
+}
+
+// finishDestroySessionLocked closes backend DB and removes the session after clients finished.
+// Caller must hold p.mu and oldSession.mu.
+// It returns the destroy-wait channel that caller must close after releasing oldSession.mu.
+func (p *PgRollback) finishDestroySessionLocked(oldSession, curSession *TestSession, testID string) (chan struct{}, error) {
+	// Between beginDestroy and finishDestroy we release p.mu and wait for proxy clients.
+	// During this window, another goroutine may install a new session for testID.
+	// In this case, oldSession teardown must finish, but we must not close/remove curSession.
+	if curSession != oldSession {
+		return p.signalDestroyWaitersLocked(oldSession), nil
+	}
+
+	if oldSession.DB == nil {
+		delete(p.SessionsByTestID, testID)
+		return p.signalDestroyWaitersLocked(oldSession), nil
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := session.DB.close(ctx)
+	err := oldSession.DB.close(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to close session: '%s': %w", testID, err)
+		return p.signalDestroyWaitersLocked(oldSession), fmt.Errorf("failed to close session: '%s': %w", testID, err)
 	}
-	session.DB = nil
+
+	oldSession.DB = nil
 	delete(p.SessionsByTestID, testID)
-	return nil
+	return p.signalDestroyWaitersLocked(oldSession), nil
+}
+
+func (p *PgRollback) signalDestroyWaiters(session *TestSession) {
+	session.mu.Lock()
+	ch := p.signalDestroyWaitersLocked(session)
+	session.mu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
+}
+
+// signalDestroyWaitersLocked resets destroy flags and returns wait channel to be closed by caller.
+// Caller must hold session.mu.
+func (p *PgRollback) signalDestroyWaitersLocked(session *TestSession) chan struct{} {
+	return session.teardown.finishDestroyLocked()
 }
 
 // RollbackBaseTransaction runs ROLLBACK and begins a new transaction on the session (used by "pgrollback rollback").
@@ -362,35 +618,26 @@ func (p *PgRollback) sessionIdleExpired(session *TestSession, timeToConsider tim
 }
 
 func (p *PgRollback) CleanupExpiredSessions() (int, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	now := time.Now()
-	cleaned := 0
-
+	var expiredIDs []string
+	p.mu.Lock()
 	for testID, session := range p.SessionsByTestID {
 		session.mu.RLock()
 		expired := p.sessionIdleExpired(session, now)
 		session.mu.RUnlock()
-
 		if expired {
-			session.mu.Lock()
-			if session.DB != nil {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				err := session.DB.close(ctx)
-				cancel()
-				if err != nil {
-					session.mu.Unlock()
-					return cleaned, fmt.Errorf("failed to close session: %w", err)
-				}
-				session.DB = nil
-			}
-			session.mu.Unlock()
-			delete(p.SessionsByTestID, testID)
-			cleaned++
+			expiredIDs = append(expiredIDs, testID)
 		}
 	}
+	p.mu.Unlock()
 
+	cleaned := 0
+	for _, testID := range expiredIDs {
+		if err := p.destroySessionIgnoreNotFound(testID); err != nil {
+			return cleaned, err
+		}
+		cleaned++
+	}
 	return cleaned, nil
 }
 

@@ -172,7 +172,7 @@ make build
 make build DYNAMIC=1
 ```
 
-**CI:** On tag pushes, [`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds Windows artifacts with **`CGO_LDFLAGS=-static`** (native `windows-latest` job and the Linux cross-compile job), consistent with the default local Windows build.
+**CI:** [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs **`go test ./...`** (unit packages only; integration lives behind **`//go:build integration`**) then **`go test ./test/integration/... -tags=integration`** against the workflow’s Postgres service. On tag pushes it also builds Linux/Windows release binaries with **`CGO_LDFLAGS=-static`** where applicable. Actions use **`actions/checkout@v6`** and **`actions/setup-go@v6`** (Node.js 24 runtime).
 
 Without a proper 64-bit `gcc`, you may see errors like `sorry, unimplemented: 64-bit mode not compiled in`.
 
@@ -187,7 +187,7 @@ Without a proper 64-bit `gcc`, you may see errors like `sorry, unimplemented: 64
 | **Unit** | `./pkg/...`, `./internal/...`, `./tests/unit/...` | No (except some `tests/unit/proxy` tests that skip if DB missing) | *(none)* |
 | **Integration** | `./test/integration/...` | **Yes** — real server + config | `-tags=integration` |
 
-Integration tests start their own proxy via `TestMain`; they use **`PGTEST_CONFIG`** (default `config/pgtest-sandbox.yaml` when using `test.bat`) and **`PGROLLBACK_LISTEN_HOST` / `PGROLLBACK_LISTEN_PORT`** for the proxy listen address.
+Integration tests start their own proxy via `TestMain`; they use **`PGROLLBACK_CONFIG`** (see `test.bat` / `internal/testutil.ConfigPath`) and **`PGROLLBACK_LISTEN_HOST` / `PGROLLBACK_LISTEN_PORT`** when overriding the proxy listen address.
 
 ### Windows (`test.bat`)
 

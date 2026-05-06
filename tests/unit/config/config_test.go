@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"pgrollback/internal/config"
 	"pgrollback/internal/testutil"
@@ -145,55 +146,145 @@ func TestLoadConfig_FromEnvVar(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_EnvOverrides(t *testing.T) {
-	// Testa se variáveis de ambiente sobrescrevem valores do arquivo
-	originalHost := os.Getenv("POSTGRES_HOST")
-	originalPort := os.Getenv("POSTGRES_PORT")
-	defer func() {
-		if originalHost != "" {
-			os.Setenv("POSTGRES_HOST", originalHost)
-		} else {
-			os.Unsetenv("POSTGRES_HOST")
-		}
-		if originalPort != "" {
-			os.Setenv("POSTGRES_PORT", originalPort)
-		} else {
-			os.Unsetenv("POSTGRES_PORT")
-		}
-	}()
-
-	// Resolve caminho do arquivo de config (unificado via testutil)
-	if testutil.ProjectRoot() == "" {
-		t.Skip("Could not find project root (go.mod not found)")
+// clearConfigEnvVars removes process env keys that LoadConfig applies after YAML,
+// so tests are not affected by CI or developer shells (POSTGRES_*, PGROLLBACK_*).
+func clearConfigEnvVars(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{
+		"POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_SESSION_TIMEOUT",
+		"PGROLLBACK_LISTEN_HOST", "PGROLLBACK_LISTEN_PORT", "PGROLLBACK_TIMEOUT", "PGROLLBACK_KEEPALIVE_INTERVAL",
+		"PGROLLBACK_LOG_LEVEL", "PGROLLBACK_LOG_FILE",
+	} {
+		t.Setenv(k, "")
 	}
-	configPath := testutil.ConfigPath()
+}
 
-	// Se arquivo não existe, usa busca automática
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		// Usa busca automática (vai usar valores padrão)
-		configPath = ""
+const testYAMLForPrecedence = `postgres:
+  host: yaml-host
+  port: 1111
+  database: yaml-db
+  user: yaml-user
+  password: yaml-secret
+  session_timeout: 1h
+proxy:
+  listen_host: yaml-lh
+  listen_port: 2222
+  timeout: 30s
+  keepalive_interval: 15s
+logging:
+  level: yaml-level
+  file: /yaml.log
+test:
+  schema: public
+  context_timeout: 10s
+  query_timeout: 5s
+  ping_timeout: 3s
+`
+
+// TestLoadConfig_EnvironmentOverridesYAML checks every env var mapped in loadFromEnv wins over YAML.
+func TestLoadConfig_EnvironmentOverridesYAML(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pgrollback.yaml")
+	if err := os.WriteFile(path, []byte(testYAMLForPrecedence), 0644); err != nil {
+		t.Fatal(err)
 	}
+	clearConfigEnvVars(t)
 
-	// Define variáveis de ambiente
-	os.Setenv("POSTGRES_HOST", "env_host")
-	os.Setenv("POSTGRES_PORT", "9999")
+	t.Setenv("POSTGRES_HOST", "env-host")
+	t.Setenv("POSTGRES_PORT", "9876")
+	t.Setenv("POSTGRES_DB", "env-db")
+	t.Setenv("POSTGRES_USER", "env-user")
+	t.Setenv("POSTGRES_PASSWORD", "env-secret")
+	t.Setenv("POSTGRES_SESSION_TIMEOUT", "2h")
+	t.Setenv("PGROLLBACK_LISTEN_HOST", "env-lh")
+	t.Setenv("PGROLLBACK_LISTEN_PORT", "7654")
+	t.Setenv("PGROLLBACK_TIMEOUT", "99s")
+	t.Setenv("PGROLLBACK_KEEPALIVE_INTERVAL", "77s")
+	t.Setenv("PGROLLBACK_LOG_LEVEL", "env-level")
+	t.Setenv("PGROLLBACK_LOG_FILE", "/env.log")
 
-	cfg, err := config.LoadConfig(configPath)
+	res, err := config.LoadConfigWithPath(path)
 	if err != nil {
-		t.Fatalf("LoadConfig() error = %v", err)
+		t.Fatalf("LoadConfigWithPath: %v", err)
 	}
+	c := res.Config
 
-	// Variáveis de ambiente devem sobrescrever valores do arquivo
-	if cfg.Postgres.Host != "env_host" {
-		t.Errorf("Postgres.Host = %v, want env_host (from env var)", cfg.Postgres.Host)
+	if c.Postgres.Host != "env-host" {
+		t.Errorf("Postgres.Host = %q, want env-host (env should override yaml-host)", c.Postgres.Host)
 	}
-	if cfg.Postgres.Port != 9999 {
-		t.Errorf("Postgres.Port = %v, want 9999 (from env var)", cfg.Postgres.Port)
+	if c.Postgres.Port != 9876 {
+		t.Errorf("Postgres.Port = %d, want 9876", c.Postgres.Port)
 	}
+	if c.Postgres.Database != "env-db" {
+		t.Errorf("Postgres.Database = %q, want env-db", c.Postgres.Database)
+	}
+	if c.Postgres.User != "env-user" {
+		t.Errorf("Postgres.User = %q, want env-user", c.Postgres.User)
+	}
+	if c.Postgres.Password != "env-secret" {
+		t.Errorf("Postgres.Password = %q, want env-secret", c.Postgres.Password)
+	}
+	if c.Postgres.SessionTimeout.Duration != 2*time.Hour {
+		t.Errorf("Postgres.SessionTimeout = %v, want 2h", c.Postgres.SessionTimeout.Duration)
+	}
+	if c.Proxy.ListenHost != "env-lh" {
+		t.Errorf("Proxy.ListenHost = %q, want env-lh", c.Proxy.ListenHost)
+	}
+	if c.Proxy.ListenPort != 7654 {
+		t.Errorf("Proxy.ListenPort = %d, want 7654", c.Proxy.ListenPort)
+	}
+	if c.Proxy.Timeout != 99*time.Second {
+		t.Errorf("Proxy.Timeout = %v, want 99s", c.Proxy.Timeout)
+	}
+	if c.Proxy.KeepaliveInterval.Duration != 77*time.Second {
+		t.Errorf("Proxy.KeepaliveInterval = %v, want 77s", c.Proxy.KeepaliveInterval.Duration)
+	}
+	if c.Logging.Level != "env-level" {
+		t.Errorf("Logging.Level = %q, want env-level", c.Logging.Level)
+	}
+	if c.Logging.File != "/env.log" {
+		t.Errorf("Logging.File = %q, want /env.log", c.Logging.File)
+	}
+}
 
-	// Limpa variáveis de ambiente
-	os.Unsetenv("POSTGRES_HOST")
-	os.Unsetenv("POSTGRES_PORT")
+// TestLoadConfig_PartialEnvYAMLPrecedence ensures unset env vars do not erase YAML; set vars still override.
+func TestLoadConfig_PartialEnvYAMLPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pgrollback.yaml")
+	if err := os.WriteFile(path, []byte(testYAMLForPrecedence), 0644); err != nil {
+		t.Fatal(err)
+	}
+	clearConfigEnvVars(t)
+	t.Setenv("POSTGRES_HOST", "only-from-env")
+	t.Setenv("PGROLLBACK_LISTEN_PORT", "3333")
+
+	res, err := config.LoadConfigWithPath(path)
+	if err != nil {
+		t.Fatalf("LoadConfigWithPath: %v", err)
+	}
+	c := res.Config
+
+	if c.Postgres.Host != "only-from-env" {
+		t.Errorf("Postgres.Host = %q, want only-from-env", c.Postgres.Host)
+	}
+	if c.Postgres.Port != 1111 {
+		t.Errorf("Postgres.Port = %d, want 1111 from YAML", c.Postgres.Port)
+	}
+	if c.Postgres.Database != "yaml-db" {
+		t.Errorf("Postgres.Database = %q, want yaml-db from YAML", c.Postgres.Database)
+	}
+	if c.Postgres.User != "yaml-user" {
+		t.Errorf("Postgres.User = %q, want yaml-user from YAML", c.Postgres.User)
+	}
+	if c.Postgres.Password != "yaml-secret" {
+		t.Errorf("Postgres.Password = %q, want yaml-secret from YAML", c.Postgres.Password)
+	}
+	if c.Proxy.ListenHost != "yaml-lh" {
+		t.Errorf("Proxy.ListenHost = %q, want yaml-lh from YAML", c.Proxy.ListenHost)
+	}
+	if c.Proxy.ListenPort != 3333 {
+		t.Errorf("Proxy.ListenPort = %d, want 3333 from env", c.Proxy.ListenPort)
+	}
 }
 
 func TestLoadConfig_ValidYAML(t *testing.T) {

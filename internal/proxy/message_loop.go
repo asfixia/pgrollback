@@ -147,17 +147,18 @@ func (p *proxyConnection) destroySessionIfRequested(testID string) bool {
 	if session == nil {
 		return false
 	}
-	session.mu.Lock()
-	defer session.mu.Unlock()
-	if session.ShouldDisconnectOnCleanupLocked() {
-		log.Printf("[PROXY] destroy session on disconnect (testID=%s, conn=%s)", testID, remoteAddr)
-		session.CancelLocked() // unblock any in-flight query so DestroySession can acquire locks
-		if err := p.server.PgRollback.DestroySessionLocked(testID, session); err != nil {
-			log.Printf("[PROXY] error destroying session on disconnect (testID=%s, conn=%s): %v", testID, remoteAddr, err)
-		}
-		return true
+	session.mu.RLock()
+	disconnect := session.ShouldDisconnectOnCleanupLocked()
+	session.mu.RUnlock()
+	if !disconnect {
+		return false
 	}
-	return false
+
+	log.Printf("[PROXY] destroy session on disconnect (testID=%s, conn=%s)", testID, remoteAddr)
+	if err := p.server.PgRollback.destroySessionCoreWithPLock(session, testID); err != nil {
+		log.Printf("[PROXY] error destroying session on disconnect (testID=%s, conn=%s): %v", testID, remoteAddr, err)
+	}
+	return true
 }
 
 func (p *proxyConnection) runDisconnectCleanup(testID string) {
@@ -173,9 +174,21 @@ func (p *proxyConnection) runDisconnectCleanup(testID string) {
 
 // RunMessageLoop é o loop principal que processa as mensagens do cliente.
 // Ele mantém a conexão aberta e despacha cada mensagem para o handler apropriado.
-func (p *proxyConnection) RunMessageLoop(testID string) {
+// testID is derived from session via PgRollback.GetTestID; callers must not pass both.
+func (p *proxyConnection) RunMessageLoop(session *TestSession) {
 	defer p.clientConn.Close()
+	if session == nil {
+		log.Printf("[PROXY] RunMessageLoop: nil session")
+		return
+	}
+	testID := p.server.PgRollback.GetTestID(session)
+	if testID == "" {
+		log.Printf("[PROXY] RunMessageLoop: session not found in SessionsByTestID map")
+		session.unregisterProxyClient(p.clientConn)
+		return
+	}
 	defer p.runDisconnectCleanup(testID)
+	defer session.unregisterProxyClient(p.clientConn)
 	// Extended Query protocol (e.g. pgx for QueryContext("SELECT 1")) typically sends:
 	//   Parse → Describe(S) → Sync → Bind → Describe(P) → Execute → Sync
 	// We forward each message to the real PostgreSQL (via the session's PgConn) and relay
@@ -255,14 +268,15 @@ func (p *proxyConnection) handleMessageClose(testID string, msg *pgproto3.Close)
 	// Deallocate on backend using connection-prefixed name (only if we prepared it); clean up per-connection maps.
 	session := p.server.PgRollback.GetSession(testID)
 	if session != nil && session.DB != nil {
-		pgConn := session.DB.PgConn()
+		db := session.DB
+		pgConn := db.PgConn()
 		if msg.ObjectType == 'S' && pgConn != nil && !p.IsMultiStatement(msg.Name) {
 			backendName := p.backendStmtName(msg.Name)
-			session.DB.LockRun()
+			db.LockRun()
 			if err := pgConn.Deallocate(session.Context(), backendName); err != nil {
 				log.Printf("[PROXY] Deallocate failed: %v", err)
 			}
-			session.DB.UnlockRun()
+			db.UnlockRun()
 		}
 		p.CloseStatementOrPortal(msg.ObjectType, msg.Name)
 	}
@@ -379,9 +393,7 @@ func (p *proxyConnection) handleMessageExecute(testID string, msg *pgproto3.Exec
 	err := p.executeViaExecPrepared(session.Context(), pgConn, backendStmtName, params, formatCodes, resultFormats)
 	elapsed := time.Since(start)
 	session.DB.UnlockRun()
-	if session.DB != nil {
-		session.DB.Gui.UpdateLastQueryHistoryDuration(elapsed)
-	}
+	session.DB.Gui.UpdateLastQueryHistoryDuration(elapsed)
 	if err != nil {
 		log.Printf("[PROXY] ExecPrepared failed: %v", err)
 		p.sendExtendedQueryErr(err)
@@ -418,6 +430,9 @@ func (p *proxyConnection) handleMessageParse(testID string, msg *pgproto3.Parse)
 		p.sendExtendedQueryErr(fmt.Errorf("sessão não encontrada para testID: %s", testID))
 		return
 	}
+	// Capture DB pointer for LockRun/defer: if another goroutine runs disconnect-all, session.DB
+	// becomes nil before defer runs; defer session.DB.UnlockRun() would then call UnlockRun on nil.
+	db := session.DB
 	interceptedQuery, err := p.server.PgRollback.InterceptQuery(testID, msg.Query, p.connectionID())
 	if err != nil {
 		p.sendExtendedQueryErr(err)
@@ -458,7 +473,7 @@ func (p *proxyConnection) handleMessageParse(testID string, msg *pgproto3.Parse)
 	// would otherwise leave the base transaction in aborted state (SQLSTATE 25P02).
 	// runWithSavepointGuardLocked is safe here because LockRun() holds d.mu.
 	var sd *pgconn.StatementDescription
-	prepErr := session.DB.runWithSavepointGuardLocked(ctx, "pgrollback_prepare_guard", func() error {
+	prepErr := db.runWithSavepointGuardLocked(ctx, "pgrollback_prepare_guard", func() error {
 		var err error
 		sd, err = pgConn.Prepare(ctx, backendName, interceptedQuery, msg.ParameterOIDs)
 		return err

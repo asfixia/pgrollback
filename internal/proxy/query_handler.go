@@ -305,6 +305,11 @@ func (p *proxyConnection) safeForwardMultipleCommandsSequential(
 	start time.Time,
 ) error {
 	session.DB.LockRun()
+	if session.DB == nil {
+		session.DB.UnlockRun()
+		return fmt.Errorf("sessão sem DB para testID: %s", testID)
+	}
+
 	if _, err := session.DB.execTxLocked(ctx, "SAVEPOINT "+multiCommandSavepointName); err != nil {
 		session.DB.UnlockRun()
 		return fmt.Errorf("criar savepoint para múltiplos comandos: %w", err)
@@ -320,8 +325,8 @@ func (p *proxyConnection) safeForwardMultipleCommandsSequential(
 
 	rollbackMulti := func() {
 		session.DB.LockRun()
+		defer session.DB.UnlockRun()
 		_, _ = session.DB.execTxLocked(ctx, "ROLLBACK TO SAVEPOINT "+multiCommandSavepointName+"; RELEASE SAVEPOINT "+multiCommandSavepointName)
-		session.DB.UnlockRun()
 	}
 
 	for i, cmd := range nonEmpty {
@@ -343,9 +348,7 @@ func (p *proxyConnection) safeForwardMultipleCommandsSequential(
 		return fmt.Errorf("falha no flush de múltiplos resultados: %w", err)
 	}
 	elapsed := time.Since(start)
-	if session.DB != nil {
-		session.DB.Gui.UpdateLastQueryHistoryDuration(elapsed)
-	}
+	session.DB.Gui.UpdateLastQueryHistoryDuration(elapsed)
 	log.Printf("[PROXY] Multi-command batch executed")
 	if sendReadyForQuery {
 		p.SendReadyForQuery()
@@ -361,6 +364,9 @@ func (p *proxyConnection) SafeForwardMultipleCommandsToDB(testID string, command
 	session := p.server.PgRollback.GetSession(testID)
 	if session == nil {
 		return fmt.Errorf("sessão não encontrada para testID: '%s'", testID)
+	}
+	if session.DB == nil {
+		return fmt.Errorf("sessão sem DB para testID: '%s'", testID)
 	}
 	ctx := session.Context()
 	pgConn := session.DB.PgConn()
@@ -509,9 +515,7 @@ func (p *proxyConnection) SafeForwardMultipleCommandsToDB(testID string, command
 	}
 
 	elapsed := time.Since(start)
-	if session.DB != nil {
-		session.DB.Gui.UpdateLastQueryHistoryDuration(elapsed)
-	}
+	session.DB.Gui.UpdateLastQueryHistoryDuration(elapsed)
 	log.Printf("[PROXY] Multi-command batch executed")
 	if sendReadyForQuery {
 		p.SendReadyForQuery()

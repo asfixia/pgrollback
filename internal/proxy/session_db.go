@@ -114,6 +114,9 @@ func (d *realSessionDB) LockRun() {
 
 // UnlockRun releases d.mu held by LockRun.
 func (d *realSessionDB) UnlockRun() {
+	if d == nil {
+		return
+	}
 	GlobalLockTraceRegistry().UnlockRWMutex(&d.mu)
 }
 
@@ -676,12 +679,22 @@ func (d *realSessionDB) releaseAdvisoryLock(ctx context.Context, lockKey int64) 
 // PgConn returns the underlying PgConn for advanced use (e.g. multi-statement batch with MultiResultReader).
 // Exported for query_handler batch path and tests. Prefer Query/Exec for normal operations.
 func (d *realSessionDB) PgConn() *pgconn.PgConn {
+	if d == nil {
+		return nil
+	}
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	return d.PgConnLocked()
+	return d.pgConnLockedNoNilCheck()
 }
 
 func (d *realSessionDB) PgConnLocked() *pgconn.PgConn {
+	if d == nil {
+		return nil
+	}
+	return d.pgConnLockedNoNilCheck()
+}
+
+func (d *realSessionDB) pgConnLockedNoNilCheck() *pgconn.PgConn {
 	if d.conn == nil {
 		return nil
 	}

@@ -1,3 +1,5 @@
+//go:build integration
+
 // Testes de integração do pgrollback: conectam ao proxy e ao PostgreSQL real.
 //
 // Estrutura do arquivo:

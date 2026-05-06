@@ -91,8 +91,20 @@ func (server *Server) startProxy(testID string, clientConn net.Conn, backend *pg
 		return
 	}
 
+	session := server.PgRollback.GetSession(testID)
+	if session == nil {
+		log.Printf("[PROXY] no session for testID=%s after startup", testID)
+		return
+	}
+	if !session.registerProxyClient(clientConn) {
+		log.Printf("[PROXY] session %s is tearing down; rejecting proxy client", testID)
+		return
+	}
+
 	// Inicia o loop de mensagens refatorado em message_loop.go
-	proxy.RunMessageLoop(testID)
+	// unregisterProxyClient is deferred inside RunMessageLoop so it runs before disconnect cleanup;
+	// otherwise destroySessionCore's WaitGroup wait would deadlock waiting on this goroutine.
+	proxy.RunMessageLoop(session)
 }
 
 // connectionID returns an opaque id for this connection so session_db can allow nested BEGIN
@@ -310,18 +322,24 @@ func (p *proxyConnection) clearStatementPortalState() {
 	p.multiStatementStatements = make(map[string]struct{})
 }
 
-// deallocateBackendStatementsOnDisconnect deallocates all of this connection's backend prepared
-// statements (skips multi-statement; those were never prepared) and clears per-connection state.
-// Call on disconnect so the shared backend is clean. Uses session from p.server.PgRollback.GetSession(testID).
-// Holds session.DB lock for the entire cleanup so any other connection (e.g. running a query to
-// count prepared statements) observes the backend only after all DEALLOCATEs have completed.
+// deallocateBackendStatementsOnDisconnect deallocates all backend prepared statements that were
+// created by this proxy connection (skips multi-statement; those were never prepared on backend)
+// and clears this connection's local statement/portal tracking.
+//
+// Call on disconnect so the shared backend session stays clean.
+//
+// Concurrency: multiple proxy connections can share the same backend DB (same testID/session).
+// We take the session DB run-lock (realSessionDB.LockRun) around each DEALLOCATE so:
+// - we don't interleave with other operations that also require the run-lock, and
+// - other connections that inspect backend prepared statements observe a consistent state.
 func (p *proxyConnection) deallocateBackendStatementsOnDisconnect(testID string) {
 	session := p.server.PgRollback.GetSession(testID)
 	if session == nil || session.DB == nil {
 		return
 	}
-	pgConn := session.DB.PgConn()
-	if pgConn == nil {
+	keptValidSessionDB := session.DB
+	keptValidBackendPgConn := keptValidSessionDB.PgConn()
+	if keptValidBackendPgConn == nil {
 		p.clearStatementPortalState()
 		return
 	}
@@ -330,9 +348,9 @@ func (p *proxyConnection) deallocateBackendStatementsOnDisconnect(testID string)
 			continue
 		}
 		backendName := p.backendStmtName(name)
-		session.DB.LockRun()
-		_ = pgConn.Deallocate(context.Background(), backendName)
-		session.DB.UnlockRun()
+		keptValidSessionDB.LockRun()
+		_ = keptValidBackendPgConn.Deallocate(context.Background(), backendName)
+		keptValidSessionDB.UnlockRun()
 	}
 	p.clearStatementPortalState()
 }

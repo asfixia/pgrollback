@@ -1,3 +1,5 @@
+//go:build integration
+
 // Funções utilitárias para testes de integração do pgrollback.
 // Este arquivo contém todas as funções auxiliares usadas pelos testes,
 // separadas do código de teste propriamente dito para melhor organização.
